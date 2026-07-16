@@ -20,6 +20,9 @@ const store = new Store();
 
 let width = 400;
 let height = 300;
+// Tracks the current live window. Reassigned whenever a window is (re)created so
+// IPC handlers and menu actions never reference a destroyed window.
+let mainWin;
 
 function createWindow() {
   const isMac = process.platform === 'darwin';
@@ -48,16 +51,23 @@ const contextMenu = new Menu()
 const recentSubmenu = new Menu()
 const windowSubmenu = new Menu()
 app.whenReady().then(() => {
-  const mainWin = createWindow()
-  mainWin.on('ready-to-show', () => {
-    console.log('Window ready to be presented');
-    mainWin.show();
-  });
-  mainWin.webContents.on('did-finish-load', () => {
-    console.log('Page fully loaded');
-    //setTimeout(loadMostRecent, 1000)
-    loadMostRecent()
-  });
+  // (Re)create the main window and wire its per-window listeners. Called at
+  // startup and again from the 'activate' handler, so `mainWin` always points
+  // at a live window even after the window is closed and reopened.
+  function openMainWindow() {
+    mainWin = createWindow()
+    mainWin.on('ready-to-show', () => {
+      console.log('Window ready to be presented');
+      mainWin.show();
+    });
+    mainWin.webContents.on('did-finish-load', () => {
+      console.log('Page fully loaded');
+      //setTimeout(loadMostRecent, 1000)
+      loadMostRecent()
+    });
+    return mainWin
+  }
+  openMainWindow()
 
   contextMenu.append(new MenuItem({
     id: "close-edit-video", label: 'Close Edit Video', visible: false,
@@ -319,8 +329,7 @@ app.whenReady().then(() => {
   
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow()
-
+      openMainWindow()
     }
   })
 
@@ -361,22 +370,23 @@ app.whenReady().then(() => {
   ipcMain.on('loaded-state', (event, filePath) => {
     addToRecent(filePath)
   })
-  ipcMain.on('record-window-size', (event, w, h) => {
-    width = mainWin.getSize()[0]
-    height = mainWin.getSize()[1]
+  ipcMain.on('record-window-size', (event) => {
+    // Use the window that actually sent the event, guarded against a destroyed
+    // window, so a stale reference can never crash the main process.
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win || win.isDestroyed()) return
+    width = win.getSize()[0]
+    height = win.getSize()[1]
   })
   ipcMain.on('move-electron-window', (event, x, y, initPos) => {
-    //var display =  screen.getDisplayNearestPoint({x: x, y: y})
-    //var dpiRespected = screen.dipToScreenPoint({x: x, y: y})
-    //mainWin.setPosition(x,y)
-    mainWin.setBounds({
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win || win.isDestroyed()) return
+    win.setBounds({
       width: width,
       height: height,
       x: x - initPos.x,
       y: y - initPos.y
     });
-    //win.setSize(width, height)
-    //mainWin.setPosition(Math.round(x / 1.25) - Math.round(initPos.x / 1.25), Math.round(y / 1.25) - Math.round(initPos.y / 1.25))
   })
   let loopToLoad = function loopToLoad(){
     if(windowIsReady){
