@@ -192,6 +192,18 @@ p {
 .hide {
   display: none !important;
 }
+/* macOS draggable title strip (element injected from preload on darwin only).
+   Spans the top edge and sits above everything; the native traffic-light
+   buttons render over it and stay clickable. */
+#macTitlebar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  z-index: 2147483647;
+  -webkit-app-region: drag;
+}
 #slider:hover .noUi-connect,
 #slider:hover .noUi-handle {
   filter: brightness(1.5);

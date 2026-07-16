@@ -22,11 +22,17 @@ let width = 400;
 let height = 300;
 
 function createWindow() {
+  const isMac = process.platform === 'darwin';
   const win = new BrowserWindow({
     backgroundColor: "#202020",
     width: width,
     height: height,
-    frame: false,
+    // On macOS keep the native window controls (close/minimize/maximize
+    // "traffic lights") while hiding the rest of the title bar. Other
+    // platforms stay fully frameless and move the window via right-drag.
+    ...(isMac
+      ? { titleBarStyle: 'hidden', trafficLightPosition: { x: 10, y: 8 } }
+      : { frame: false }),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: true,

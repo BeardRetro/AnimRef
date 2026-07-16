@@ -4,6 +4,17 @@ const {
   ipcMain
 } = require('electron')
 
+// macOS: add a draggable strip along the top edge so the window can be moved
+// normally (in addition to right-drag). It is attached to <html> as a sibling
+// of <body> so the canvas pan/zoom transform on <body> can't move it.
+if (process.platform === 'darwin') {
+  window.addEventListener('DOMContentLoaded', () => {
+    const bar = document.createElement('div')
+    bar.id = 'macTitlebar'
+    document.documentElement.appendChild(bar)
+  })
+}
+
 const addEvent = function (el, type, fn) {
   if (el.addEventListener)
     el.addEventListener(type, fn, false);
