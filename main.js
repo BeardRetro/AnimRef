@@ -286,16 +286,42 @@ app.whenReady().then(() => {
   function loadMostRecent() {
     var recent = JSON.parse(store.get('recent') || "[]")
     if (recent.length > 0)
-      readAndLoadFilePath(recent[recent.length - 1])
+      readAndLoadFilePath(recent[recent.length - 1], true)
+  }
+
+  function removeFromRecent(filePath) {
+    var recent = JSON.parse(store.get('recent') || "[]")
+    var idx = recent.indexOf(filePath)
+    if (idx !== -1) {
+      recent.splice(idx, 1)
+      store.set('recent', JSON.stringify(recent))
+    }
   }
 
   contextMenu.append(new MenuItem({ type: 'separator' }))
 
-  function readAndLoadFilePath(filePath) {
+  // isAutoLoad = true when loading the most-recent scene at startup: a missing or
+  // unreadable file must never crash the app (files get moved/deleted), so prune
+  // it and fall back to the next most-recent instead of throwing.
+  function readAndLoadFilePath(filePath, isAutoLoad = false) {
     fs.readFile(filePath, (err, data) => {
-      if (err) throw err;
-      let newState = JSON.parse(data);
-      mainWin.webContents.send('load-scene', newState, filePath)
+      if (err) {
+        console.log('Could not open scene file, removing from recent:', filePath, err.code)
+        removeFromRecent(filePath)
+        if (isAutoLoad) loadMostRecent()
+        return
+      }
+      let newState
+      try {
+        newState = JSON.parse(data)
+      } catch (e) {
+        console.log('Could not parse scene file, removing from recent:', filePath, e.message)
+        removeFromRecent(filePath)
+        if (isAutoLoad) loadMostRecent()
+        return
+      }
+      if (mainWin && !mainWin.isDestroyed())
+        mainWin.webContents.send('load-scene', newState, filePath)
     });
   }
 
