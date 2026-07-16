@@ -31,7 +31,9 @@
   },
   "config": {
     "forge": {
-      "packagerConfig": {},
+      "packagerConfig": {
+        "name": "AnimRef"
+      },
       "make_targets": {
         "win32": [
           "squirrel"
