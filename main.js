@@ -24,12 +24,45 @@ let height = 300;
 // IPC handlers and menu actions never reference a destroyed window.
 let mainWin;
 
+// True if the given bounds overlap any currently connected display, so we don't
+// restore a window onto a monitor that has since been unplugged.
+function isOnScreen(bounds) {
+  return screen.getAllDisplays().some(d => {
+    const wa = d.workArea;
+    return bounds.x < wa.x + wa.width && bounds.x + bounds.width > wa.x &&
+      bounds.y < wa.y + wa.height && bounds.y + bounds.height > wa.y;
+  });
+}
+
+// Restore the last-used size/position, or on first launch open at a comfortable
+// fraction of the primary display instead of the old tiny 400x300 default.
+function resolveInitialBounds() {
+  const saved = store.get('windowBounds');
+  if (saved && saved.width && saved.height) {
+    if (saved.x === undefined || saved.y === undefined || !isOnScreen(saved)) {
+      return { width: saved.width, height: saved.height };
+    }
+    return saved;
+  }
+  const { workAreaSize } = screen.getPrimaryDisplay();
+  return {
+    width: Math.min(1400, Math.round(workAreaSize.width * 0.7)),
+    height: Math.min(900, Math.round(workAreaSize.height * 0.8)),
+  };
+}
+
 function createWindow() {
   const isMac = process.platform === 'darwin';
+  const bounds = resolveInitialBounds();
+  width = bounds.width;
+  height = bounds.height;
   const win = new BrowserWindow({
     backgroundColor: "#202020",
-    width: width,
-    height: height,
+    width: bounds.width,
+    height: bounds.height,
+    minWidth: 400,
+    minHeight: 300,
+    ...(bounds.x !== undefined && bounds.y !== undefined ? { x: bounds.x, y: bounds.y } : {}),
     // On macOS keep the native window controls (close/minimize/maximize
     // "traffic lights") while hiding the rest of the title bar. Other
     // platforms stay fully frameless and move the window via right-drag.
@@ -42,6 +75,20 @@ function createWindow() {
     }
   })
   win.setAlwaysOnTop(true);
+
+  // Remember size/position so the window reopens the way the user left it.
+  // getNormalBounds() ignores maximized/minimized state so we store the real
+  // restored size.
+  const persistBounds = () => {
+    if (win.isDestroyed() || win.isMinimized()) return;
+    const b = win.getNormalBounds();
+    width = b.width;
+    height = b.height;
+    store.set('windowBounds', b);
+  };
+  win.on('resized', persistBounds);
+  win.on('moved', persistBounds);
+  win.on('close', persistBounds);
 
   win.loadFile('index.html')
   return win;
