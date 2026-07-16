@@ -49,19 +49,41 @@ document.addEventListener('touchmove', function (e) {
 }, true);
 
 const factor = 0.1
+const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0
 document.documentElement.addEventListener("wheel", (e) => {
-    let delta = e.wheelDelta / 120
-    if (e.ctrlKey) { // is pinch zoom on touchpad(idk why it's ctrlKey but it is)
-        delta = e.deltaY * factor
-    }
     if (document.querySelector('.editVideo')) return;
+
+    // preventDefault stops the browser's own ctrl+wheel page zoom and the
+    // two-finger horizontal swipe back/forward navigation on macOS.
+    e.preventDefault()
+
+    // On macOS follow native trackpad conventions: two-finger scroll pans and
+    // pinch zooms (Chromium reports a trackpad pinch as a ctrlKey wheel event).
+    // Cmd+scroll also zooms, for people using a mouse. Other platforms keep the
+    // original wheel-to-zoom behavior.
+    const shouldZoom = isMac ? (e.ctrlKey || e.metaKey) : true
+
+    if (!shouldZoom) {
+        // Pan the canvas with the scroll delta.
+        currentScale = parseFloat(document.body.dataset.currentScale) || 1
+        const translateX = (parseFloat(document.body.dataset.translateX) || 0) - e.deltaX
+        const translateY = (parseFloat(document.body.dataset.translateY) || 0) - e.deltaY
+        myAPI.updateScaleAndTranslate(currentScale, { translateX, translateY })
+        return
+    }
+
+    let delta = e.wheelDelta / 120
+    if (e.ctrlKey) { // pinch-zoom on a trackpad arrives as ctrlKey wheel events
+        // Pinch out (fingers apart) reports deltaY < 0 and should zoom in, so
+        // negate to match the natural direction.
+        delta = -e.deltaY * factor
+    }
     currentScale = parseFloat(document.body.dataset.currentScale) || 1
 
     const nextScale = Math.max(currentScale + delta * (currentScale / 2), 0.01)
-    console.log("wheel", delta, currentScale, nextScale)
     zoom(nextScale, e)
 
-})
+}, { passive: false })
 
 const zoom = (nextScale, event) => {
     currentScale = parseFloat(document.body.dataset.currentScale) || 1
