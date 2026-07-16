@@ -191,11 +191,16 @@ document.addEventListener('keydown', evt => {
   mouseObj.keys[evt.key] = true
 
 
-  if (evt.key === 'Delete') {
+  // On Mac keyboards the main deletion key reports as 'Backspace', not 'Delete'
+  // (which is only the fn+Delete forward-delete). Accept both, but don't hijack
+  // it while the user is typing in an editable field.
+  const t = evt.target
+  const editingText = t && (t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')
+  if ((evt.key === 'Delete' || evt.key === 'Backspace') && !editingText) {
 
     console.log('delete selected')
     deleteSelected()
-  } else if (evt.key === 'v' && evt.ctrlKey) {
+  } else if (evt.key === 'v' && (evt.ctrlKey || evt.metaKey)) {
     ipcRenderer.send('handle-paste')
     console.log('Ctrl+V was pressed');
   } else if (evt.key === ' ' && evt.ctrlKey) {

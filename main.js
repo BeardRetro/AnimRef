@@ -174,6 +174,27 @@ app.whenReady().then(() => {
     });
   }
 
+  // Shared by both the right-click context menu and the application menu bar.
+  function loadSceneDialog() {
+    dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [{ name: 'PurRef Gif Scene', extensions: ['purgif'] }]
+    }).then(result => {
+      if (!result.canceled) readAndLoadFilePath(result.filePaths[0])
+    }).catch(err => console.log(err))
+  }
+  function saveSceneDialog() {
+    dialog.showSaveDialog({
+      defaultPath: 'scene.purgif',
+      filters: [{ name: 'PurRef Gif Scene', extensions: ['purgif'] }]
+    }).then(result => {
+      if (!result.canceled) {
+        mainWin.webContents.send('save-scene', result.filePath)
+        addToRecent(result.filePath)
+      }
+    }).catch(err => console.log(err))
+  }
+
   contextMenu.append(new MenuItem({
     label: "Recent", type: 'submenu',
     submenu: recentSubmenu
@@ -208,43 +229,12 @@ app.whenReady().then(() => {
   contextMenu.append(new MenuItem({
     label: 'Load',
     accelerator: process.platform === 'darwin' ? 'Cmd+L' : 'Ctrl+L',
-    click: (menuItem, browserWindow, event) => {
-      dialog.showOpenDialog({
-        properties: ['openFile'],
-        filters: [
-          { name: 'PurRef Gif Scene', extensions: ['purgif'] }
-        ]
-      }).then(result => {
-        console.log(result.canceled)
-        console.log("result.filePaths", result.filePaths)
-        if (!result.canceled) {
-          readAndLoadFilePath(result.filePaths[0])
-        }
-      }).catch(err => {
-        console.log(err)
-      })
-    }
+    click: loadSceneDialog
   }));
   contextMenu.append(new MenuItem({
     label: 'Save',
     accelerator: process.platform === 'darwin' ? 'Cmd+S' : 'Ctrl+S',
-    click: (menuItem, browserWindow, event) => {
-      dialog.showSaveDialog({
-        defaultPath: 'scene.purgif',
-        filters: [
-          { name: 'PurRef Gif Scene', extensions: ['purgif'] }
-        ]
-      }).then(result => {
-        console.log(result.canceled)
-        console.log(result.filePath)
-        if (!result.canceled) {
-          mainWin.webContents.send('save-scene', result.filePath)
-          addToRecent(result.filePath)
-        }
-      }).catch(err => {
-        console.log(err)
-      })
-    }
+    click: saveSceneDialog
   }));
   contextMenu.append(new MenuItem({
     label: 'New Scene',
@@ -261,7 +251,62 @@ app.whenReady().then(() => {
     }
   }));
 
-  Menu.setApplicationMenu(contextMenu)
+  // The application menu bar (macOS) / window menu (Win/Linux) needs a nested
+  // submenu structure — a flat menu is silently dropped on macOS, which also
+  // prevents its accelerators from ever firing. Keep `contextMenu` for the
+  // right-click popup and build a separate, properly structured menu here.
+  const isMac = process.platform === 'darwin';
+  const appMenu = Menu.buildFromTemplate([
+    // Explicit app menu instead of role:'appMenu' so the name-bearing items read
+    // "AnimRef" — the built-in role derives them from app.getName(), which is the
+    // lowercase npm package name.
+    ...(isMac ? [{
+      label: 'AnimRef',
+      submenu: [
+        { role: 'about', label: 'About AnimRef' },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide', label: 'Hide AnimRef' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit', label: 'Quit AnimRef' }
+      ]
+    }] : []),
+    {
+      label: 'File',
+      submenu: [
+        { label: 'New Scene', accelerator: 'CmdOrCtrl+N', click: () => mainWin.webContents.send('new-scene') },
+        { label: 'Load', accelerator: 'CmdOrCtrl+L', click: loadSceneDialog },
+        { label: 'Save', accelerator: 'CmdOrCtrl+S', click: saveSceneDialog },
+        { type: 'separator' },
+        { label: 'Close', accelerator: 'CmdOrCtrl+W', click: (item, win) => win && win.close() },
+        ...(isMac ? [] : [{ role: 'quit' }])
+      ]
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        // No accelerator here: Cmd/Ctrl+V is handled in preload.js so paste
+        // fires exactly once. The menu item remains clickable.
+        { label: 'Paste', click: () => handlePaste() }
+      ]
+    },
+    {
+      label: 'Window',
+      submenu: [
+        {
+          label: 'Maximize', accelerator: 'CmdOrCtrl+F',
+          click: (item, win) => { if (win) win.isMaximized() ? win.unmaximize() : win.maximize() }
+        },
+        { label: 'Minimize', accelerator: 'CmdOrCtrl+M', click: (item, win) => win && win.minimize() },
+        { type: 'separator' },
+        { label: 'Always on Top', type: 'checkbox', checked: true, click: (item) => mainWin.setAlwaysOnTop(item.checked) }
+      ]
+    }
+  ])
+  Menu.setApplicationMenu(appMenu)
 
   if (process.argv.indexOf("debug") > -1)
     mainWin.webContents.openDevTools()
