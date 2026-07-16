@@ -98,6 +98,11 @@ const contextMenu = new Menu()
 const recentSubmenu = new Menu()
 const windowSubmenu = new Menu()
 app.whenReady().then(() => {
+  // Set when the user chooses to quit (Cmd+Q) so the close handler can quit the
+  // app rather than just close the window once any save prompt is resolved.
+  let isQuitting = false
+  app.on('before-quit', () => { isQuitting = true })
+
   // (Re)create the main window and wire its per-window listeners. Called at
   // startup and again from the 'activate' handler, so `mainWin` always points
   // at a live window even after the window is closed and reopened.
@@ -112,8 +117,65 @@ app.whenReady().then(() => {
       //setTimeout(loadMostRecent, 1000)
       loadMostRecent()
     });
+    attachSaveOnClose(mainWin)
     return mainWin
   }
+
+  // Prompt to save before closing when the canvas has content. Handles both
+  // closing the window (Cmd+W / red traffic light) and quitting (Cmd+Q).
+  function attachSaveOnClose(win) {
+    win.on('close', async (e) => {
+      if (win._animrefAllowClose) return
+      e.preventDefault()
+
+      let count = 0
+      try {
+        count = await win.webContents.executeJavaScript(
+          'window.myAPI && window.myAPI.getElementCount ? window.myAPI.getElementCount() : 0')
+      } catch (err) { count = 0 }
+
+      if (count > 0) {
+        const { response } = await dialog.showMessageBox(win, {
+          type: 'warning',
+          buttons: ['Save…', "Don't Save", 'Cancel'],
+          defaultId: 0,
+          cancelId: 2,
+          message: 'Save changes before closing?',
+          detail: "If you don't save, the current reference scene will be lost."
+        })
+        if (response === 2) { isQuitting = false; return }       // Cancel
+        if (response === 0 && !(await saveForClose(win))) {      // Save cancelled
+          isQuitting = false; return
+        }
+        // response === 1 (Don't Save) falls through and closes.
+      }
+
+      win._animrefAllowClose = true
+      if (isQuitting) app.quit()
+      else win.close()
+    })
+  }
+
+  // Save flow used by the close prompt; awaits the write so the window isn't torn
+  // down before the file is written. Returns false if the user cancels or it fails.
+  async function saveForClose(win) {
+    const result = await dialog.showSaveDialog(win, {
+      defaultPath: 'scene.purgif',
+      filters: [{ name: 'PurRef Gif Scene', extensions: ['purgif'] }]
+    })
+    if (result.canceled || !result.filePath) return false
+    try {
+      const data = await win.webContents.executeJavaScript('window.myAPI.getSceneData()')
+      fs.writeFileSync(result.filePath, JSON.stringify(data))
+      addToRecent(result.filePath)
+      return true
+    } catch (err) {
+      console.log('save-on-close failed', err)
+      dialog.showErrorBox('Save failed', String((err && err.message) || err))
+      return false
+    }
+  }
+
   openMainWindow()
 
   contextMenu.append(new MenuItem({

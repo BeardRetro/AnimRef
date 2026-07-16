@@ -672,7 +672,18 @@ contextBridge.exposeInMainWorld('myAPI', {
     }
 
   },
-  objPlayground: objPlayground
+  objPlayground: objPlayground,
+  // Used by the main process to decide whether to prompt to save on close, and
+  // to grab a serializable copy of the scene (same shape as the 'save-scene'
+  // handler builds) without a round-trip.
+  getElementCount: () => state.elements.length,
+  getSceneData: () => {
+    var stateCopy = JSON.parse(JSON.stringify(state));
+    for (var i = 0; i < stateCopy.elements.length; i++) {
+      delete stateCopy.elements[i].element;
+    }
+    return stateCopy;
+  }
 
 })
 
