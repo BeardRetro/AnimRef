@@ -116,6 +116,7 @@ app.whenReady().then(() => {
       console.log('Page fully loaded');
       //setTimeout(loadMostRecent, 1000)
       loadMostRecent()
+      mainWin.webContents.send('set-resize-mode', store.get('resizeMode') || 'centered')
     });
     attachSaveOnClose(mainWin)
     return mainWin
@@ -128,23 +129,25 @@ app.whenReady().then(() => {
       if (win._animrefAllowClose) return
       e.preventDefault()
 
-      let count = 0
+      // Prompt only when there are actually unsaved changes (computed fresh, so a
+      // change made just before closing isn't missed by the polling interval).
+      let dirty = false
       try {
-        count = await win.webContents.executeJavaScript(
-          'window.myAPI && window.myAPI.getElementCount ? window.myAPI.getElementCount() : 0')
-      } catch (err) { count = 0 }
+        dirty = await win.webContents.executeJavaScript(
+          'window.myAPI && window.myAPI.getIsDirty ? window.myAPI.getIsDirty() : false')
+      } catch (err) { dirty = false }
 
-      if (count > 0) {
+      if (dirty) {
         const { response } = await dialog.showMessageBox(win, {
           type: 'warning',
           buttons: ['Save…', "Don't Save", 'Cancel'],
           defaultId: 0,
           cancelId: 2,
           message: 'Save changes before closing?',
-          detail: "If you don't save, the current reference scene will be lost."
+          detail: "If you don't save, your changes will be lost."
         })
         if (response === 2) { isQuitting = false; return }       // Cancel
-        if (response === 0 && !(await saveForClose(win))) {      // Save cancelled
+        if (response === 0 && !(await doSave(win, false))) {     // Save (or Save As) cancelled
           isQuitting = false; return
         }
         // response === 1 (Don't Save) falls through and closes.
@@ -154,26 +157,6 @@ app.whenReady().then(() => {
       if (isQuitting) app.quit()
       else win.close()
     })
-  }
-
-  // Save flow used by the close prompt; awaits the write so the window isn't torn
-  // down before the file is written. Returns false if the user cancels or it fails.
-  async function saveForClose(win) {
-    const result = await dialog.showSaveDialog(win, {
-      defaultPath: 'scene.purgif',
-      filters: [{ name: 'PurRef Gif Scene', extensions: ['purgif'] }]
-    })
-    if (result.canceled || !result.filePath) return false
-    try {
-      const data = await win.webContents.executeJavaScript('window.myAPI.getSceneData()')
-      fs.writeFileSync(result.filePath, JSON.stringify(data))
-      addToRecent(result.filePath)
-      return true
-    } catch (err) {
-      console.log('save-on-close failed', err)
-      dialog.showErrorBox('Save failed', String((err && err.message) || err))
-      return false
-    }
   }
 
   openMainWindow()
@@ -334,16 +317,47 @@ app.whenReady().then(() => {
       if (!result.canceled) readAndLoadFilePath(result.filePaths[0])
     }).catch(err => console.log(err))
   }
-  function saveSceneDialog() {
-    dialog.showSaveDialog({
-      defaultPath: 'scene.purgif',
-      filters: [{ name: 'PurRef Gif Scene', extensions: ['purgif'] }]
-    }).then(result => {
-      if (!result.canceled) {
-        mainWin.webContents.send('save-scene', result.filePath)
-        addToRecent(result.filePath)
-      }
-    }).catch(err => console.log(err))
+  // Smart save. When the document already has a file and forceDialog is false,
+  // write straight to it with no dialog; otherwise (new document, or Save As)
+  // prompt for a location, defaulting to the current file's name.
+  async function doSave(win, forceDialog) {
+    win = (win && !win.isDestroyed()) ? win : mainWin
+    if (!win || win.isDestroyed()) return false
+    let info = null
+    try { info = await win.webContents.executeJavaScript('window.myAPI && window.myAPI.getSaveInfo ? window.myAPI.getSaveInfo() : null') } catch (e) {}
+    let targetPath = info && info.filePath
+    if (forceDialog || !targetPath) {
+      const result = await dialog.showSaveDialog(win, {
+        defaultPath: targetPath || 'scene.purgif',
+        filters: [{ name: 'PurRef Gif Scene', extensions: ['purgif'] }]
+      })
+      if (result.canceled || !result.filePath) return false
+      targetPath = result.filePath
+    }
+    try {
+      const data = await win.webContents.executeJavaScript('window.myAPI.getSceneData()')
+      fs.writeFileSync(targetPath, JSON.stringify(data))
+      addToRecent(targetPath)
+      win.webContents.send('scene-saved', targetPath) // renderer clears dirty + updates title
+      return true
+    } catch (err) {
+      console.log('save failed', err)
+      dialog.showErrorBox('Save failed', String((err && err.message) || err))
+      return false
+    }
+  }
+
+  // Persist the resize mode, tell the renderer, and keep both the app menu bar
+  // and the right-click menu checkboxes in sync (the toggle lives in both).
+  function applyResizeMode(mode) {
+    store.set('resizeMode', mode)
+    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('set-resize-mode', mode)
+    const checked = mode === 'zoom'
+    const appMenuRef = Menu.getApplicationMenu()
+    const appItem = appMenuRef && appMenuRef.getMenuItemById('toggle-zoom-resize')
+    if (appItem) appItem.checked = checked
+    const ctxItem = contextMenu.getMenuItemById('toggle-zoom-resize-ctx')
+    if (ctxItem) ctxItem.checked = checked
   }
 
   contextMenu.append(new MenuItem({
@@ -377,6 +391,14 @@ app.whenReady().then(() => {
         browserWindow.minimize();
     }
   }));
+  windowSubmenu.append(new MenuItem({ type: 'separator' }));
+  windowSubmenu.append(new MenuItem({
+    id: 'toggle-zoom-resize-ctx',
+    label: 'Zoom Content When Resizing',
+    type: 'checkbox',
+    checked: (store.get('resizeMode') || 'centered') === 'zoom',
+    click: (item) => applyResizeMode(item.checked ? 'zoom' : 'centered')
+  }));
   contextMenu.append(new MenuItem({
     label: 'Load',
     accelerator: process.platform === 'darwin' ? 'Cmd+L' : 'Ctrl+L',
@@ -385,7 +407,12 @@ app.whenReady().then(() => {
   contextMenu.append(new MenuItem({
     label: 'Save',
     accelerator: process.platform === 'darwin' ? 'Cmd+S' : 'Ctrl+S',
-    click: saveSceneDialog
+    click: (menuItem, browserWindow) => doSave(browserWindow, false)
+  }));
+  contextMenu.append(new MenuItem({
+    label: 'Save As…',
+    accelerator: process.platform === 'darwin' ? 'Cmd+Shift+S' : 'Ctrl+Shift+S',
+    click: (menuItem, browserWindow) => doSave(browserWindow, true)
   }));
   contextMenu.append(new MenuItem({
     label: 'New Scene',
@@ -430,7 +457,8 @@ app.whenReady().then(() => {
       submenu: [
         { label: 'New Scene', accelerator: 'CmdOrCtrl+N', click: () => mainWin.webContents.send('new-scene') },
         { label: 'Load', accelerator: 'CmdOrCtrl+L', click: loadSceneDialog },
-        { label: 'Save', accelerator: 'CmdOrCtrl+S', click: saveSceneDialog },
+        { label: 'Save', accelerator: 'CmdOrCtrl+S', click: (item, win) => doSave(win, false) },
+        { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', click: (item, win) => doSave(win, true) },
         { type: 'separator' },
         { label: 'Close', accelerator: 'CmdOrCtrl+W', click: (item, win) => win && win.close() },
         ...(isMac ? [] : [{ role: 'quit' }])
@@ -453,7 +481,15 @@ app.whenReady().then(() => {
         },
         { label: 'Minimize', accelerator: 'CmdOrCtrl+M', click: (item, win) => win && win.minimize() },
         { type: 'separator' },
-        { label: 'Always on Top', type: 'checkbox', checked: true, click: (item) => mainWin.setAlwaysOnTop(item.checked) }
+        { label: 'Always on Top', type: 'checkbox', checked: true, click: (item) => mainWin.setAlwaysOnTop(item.checked) },
+        {
+          // When checked, resizing the window scales the canvas content with it;
+          // when unchecked, content keeps its size and just stays centered.
+          id: 'toggle-zoom-resize',
+          label: 'Zoom Content When Resizing', type: 'checkbox',
+          checked: (store.get('resizeMode') || 'centered') === 'zoom',
+          click: (item) => applyResizeMode(item.checked ? 'zoom' : 'centered')
+        }
       ]
     }
   ])
@@ -489,12 +525,17 @@ app.whenReady().then(() => {
     }
     contextMenu.popup(win)
   })
-  ipcMain.on('save-scene', (event, filePath, stateCopy) => {
-    console.log('save', filePath, stateCopy)
-    let data = JSON.stringify(stateCopy);
-    fs.writeFileSync(filePath, data);
-    //const win = BrowserWindow.fromWebContents(event.sender)
-    //menu.popup(win)
+  // Reflect the renderer's document state onto the native window: title (shown
+  // in the Window menu / Mission Control) and the macOS "edited" dot on the
+  // close button + proxy-icon filename.
+  ipcMain.on('doc-state', (event, info) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win || win.isDestroyed() || !info) return
+    win.setTitle('AnimRef — ' + (info.name || 'Untitled') + (info.isDirty ? ' *' : ''))
+    if (process.platform === 'darwin') {
+      win.setDocumentEdited(!!info.isDirty)
+      try { win.setRepresentedFilename(info.filePath || '') } catch (e) {}
+    }
   })
   let dragState = {
     dragging: false

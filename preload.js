@@ -11,7 +11,11 @@ if (process.platform === 'darwin') {
   window.addEventListener('DOMContentLoaded', () => {
     const bar = document.createElement('div')
     bar.id = 'macTitlebar'
+    const title = document.createElement('span')
+    title.id = 'macTitlebarText'
+    bar.appendChild(title)
     document.documentElement.appendChild(bar)
+    updateTitle()
   })
 }
 
@@ -55,6 +59,64 @@ let videoExample = {
   loopPairs: [[0, 119], [44, 56]], // can derive A, B, C & color coding from index
   activeLoopPair: 0
 }
+// --- Current-document model -------------------------------------------------
+// Tracks which file is open and whether it has unsaved changes. Drives smart
+// save (save vs save-as), the title-bar filename, and the unsaved-changes
+// asterisk. Dirtiness is derived by comparing a signature of the scene's
+// elements (paths/positions/sizes/loops/order) against the last-saved snapshot,
+// which excludes pan/zoom — panning around isn't an "edit".
+let currentFilePath = null
+let isDirty = false
+let isLoading = false
+let lastSavedSignature = '[]'
+
+function sceneSignature() {
+  try {
+    return JSON.stringify(state.elements.map(e => {
+      const c = Object.assign({}, e)
+      delete c.element
+      return c
+    }))
+  } catch (err) {
+    return 'sig-error-' + state.elements.length
+  }
+}
+
+function documentName() {
+  if (!currentFilePath) return 'Untitled'
+  return currentFilePath.replace(/^.*[\\/]/, '').replace(/\.purgif$/i, '')
+}
+
+function updateTitle() {
+  const label = documentName() + (isDirty ? ' *' : '')
+  const el = document.getElementById('macTitlebarText')
+  if (el) el.textContent = label
+  document.title = label + ' — AnimRef'
+  ipcRenderer.send('doc-state', { name: documentName(), isDirty: isDirty, filePath: currentFilePath })
+}
+
+// Called when the scene is saved or loaded: the current scene becomes the
+// clean baseline.
+function markSaved(filePath) {
+  if (filePath) currentFilePath = filePath
+  lastSavedSignature = sceneSignature()
+  isDirty = false
+  updateTitle()
+}
+
+// Poll for edits so the asterisk stays live without hooking every mutation.
+setInterval(() => {
+  if (isLoading) return
+  const dirty = sceneSignature() !== lastSavedSignature
+  if (dirty !== isDirty) {
+    isDirty = dirty
+    updateTitle()
+  }
+}, 400)
+
+ipcRenderer.on('scene-saved', (e, filePath) => markSaved(filePath))
+// ---------------------------------------------------------------------------
+
 function closeEditVideo() {
   //state.editVideo.videoElement.removeEventListener('timeupdate', onPlayerProgress)
   state.mode = 'standard'
@@ -178,6 +240,11 @@ function newScene() {
 
   state.elements = []
   document.querySelector('#welcome').classList.remove("hide")
+
+  currentFilePath = null
+  lastSavedSignature = sceneSignature() // empty scene is the clean baseline
+  isDirty = false
+  updateTitle()
 }
 
 function loadState(loadedState, filePath) {
@@ -186,14 +253,18 @@ function loadState(loadedState, filePath) {
   if (state.mode == 'init')
     init();
 
-
+  isLoading = true // suppress dirty detection while elements are being populated
   newScene()
+  currentFilePath = filePath
+  updateTitle()
   updateScaleAndTranslate(loadedState.currentScale, loadedState.translate)
 
   setTimeout(function () {
     for (var i in loadedState.elements) {
       addMediaWithPath(loadedState.elements[i].path, loadedState.elements[i].type, loadedState.elements[i])
     }
+    markSaved(filePath) // the just-loaded scene is the clean baseline
+    isLoading = false
     ipcRenderer.send('loaded-state', filePath)
   }, 1000);
 }
@@ -233,6 +304,47 @@ document.addEventListener('keyup', evt => {
     }
   }
 
+})
+
+// Window-resize behavior, toggled from the Window menu and persisted in main.
+// 'centered' keeps the centered point centered at the same zoom; 'zoom' scales
+// the content along with the window. There was previously no resize handling at
+// all, so content stayed pinned to the top-left origin as the window grew.
+let resizeMode = 'centered'
+ipcRenderer.on('set-resize-mode', (e, mode) => { resizeMode = mode })
+
+let lastResizeW = window.innerWidth
+let lastResizeH = window.innerHeight
+let resizeTransitionTimer = null
+window.addEventListener('resize', () => {
+  const newW = window.innerWidth, newH = window.innerHeight
+  const oldW = lastResizeW, oldH = lastResizeH
+  lastResizeW = newW
+  lastResizeH = newH
+  if (!oldW || !oldH || (newW === oldW && newH === oldH)) return
+  if (document.querySelector('.editVideo')) return // video-edit mode fills the window itself
+
+  // The body has a 0.1s transform transition for smooth pan/zoom, which makes
+  // content ease behind the window edge during a live resize. Turn it off while
+  // resizing so content tracks the edge, and restore it once resizing settles.
+  document.body.style.transition = 'none'
+  clearTimeout(resizeTransitionTimer)
+  resizeTransitionTimer = setTimeout(() => { document.body.style.transition = '' }, 200)
+
+  const s = parseFloat(document.body.dataset.currentScale) || 1
+  const tx = parseFloat(document.body.dataset.translateX) || 0
+  const ty = parseFloat(document.body.dataset.translateY) || 0
+
+  if (resizeMode === 'zoom') {
+    // Scale content with the window, keeping the old window-center point fixed.
+    const r = Math.sqrt((newW / oldW) * (newH / oldH))
+    const newTx = (newW / 2) - r * ((oldW / 2) - tx)
+    const newTy = (newH / 2) - r * ((oldH / 2) - ty)
+    updateScaleAndTranslate(s * r, { translateX: newTx, translateY: newTy })
+  } else {
+    // Keep the current center point centered; content size unchanged.
+    updateScaleAndTranslate(s, { translateX: tx + (newW - oldW) / 2, translateY: ty + (newH - oldH) / 2 })
+  }
 })
 
 function getSelected() {
@@ -350,15 +462,6 @@ ipcRenderer.on('new-scene', (event) => {
 })
 ipcRenderer.on('load-scene', (event, newState, filePath) => {
   loadState(newState, filePath)
-})
-ipcRenderer.on('save-scene', (event, filePath) => {
-  var stateCopy = JSON.parse(JSON.stringify(state));
-  for (var i = 0; i < stateCopy.elements.length; i++) {
-    //stateCopy.elements.push()
-    delete stateCopy.elements[i].element;
-  }
-  console.log(stateCopy)
-  ipcRenderer.send('save-scene', filePath, stateCopy)
 })
 ipcRenderer.on('clipboard', (event, msg) => {
   let payload = JSON.parse(msg);
@@ -683,7 +786,11 @@ contextBridge.exposeInMainWorld('myAPI', {
       delete stateCopy.elements[i].element;
     }
     return stateCopy;
-  }
+  },
+  // Current-document info + a fresh dirty check, used by the main process for
+  // smart save and the save-on-close prompt.
+  getSaveInfo: () => ({ filePath: currentFilePath, name: documentName() }),
+  getIsDirty: () => !isLoading && sceneSignature() !== lastSavedSignature
 
 })
 

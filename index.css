@@ -204,6 +204,25 @@ p {
   z-index: 2147483647;
   -webkit-app-region: drag;
 }
+/* Current file name (+ "*" when unsaved) shown centered in the title strip. */
+#macTitlebarText {
+  position: absolute;
+  left: 80px;
+  right: 80px;
+  top: 0;
+  height: 28px;
+  line-height: 28px;
+  text-align: center;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 12px;
+  color: #9a9a9a;
+  -webkit-user-select: none;
+  user-select: none;
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 #slider:hover .noUi-connect,
 #slider:hover .noUi-handle {
   filter: brightness(1.5);
