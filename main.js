@@ -20,9 +20,21 @@ const store = new Store();
 
 let width = 400;
 let height = 300;
-// Tracks the current live window. Reassigned whenever a window is (re)created so
-// IPC handlers and menu actions never reference a destroyed window.
-let mainWin;
+
+// Every window is an independent document, so actions must act on the window
+// that triggered them. Menu handlers get the invoking window; fall back to the
+// focused window, then to any open window.
+function targetWindow(win) {
+  if (win && !win.isDestroyed()) return win;
+  const focused = BrowserWindow.getFocusedWindow();
+  if (focused && !focused.isDestroyed()) return focused;
+  return BrowserWindow.getAllWindows().find(w => !w.isDestroyed()) || null;
+}
+
+function sendTo(win, channel, ...args) {
+  const w = targetWindow(win);
+  if (w) w.webContents.send(channel, ...args);
+}
 
 // True if the given bounds overlap any currently connected display, so we don't
 // restore a window onto a monitor that has since been unplugged.
@@ -37,18 +49,33 @@ function isOnScreen(bounds) {
 // Restore the last-used size/position, or on first launch open at a comfortable
 // fraction of the primary display instead of the old tiny 400x300 default.
 function resolveInitialBounds() {
+  let bounds;
   const saved = store.get('windowBounds');
   if (saved && saved.width && saved.height) {
-    if (saved.x === undefined || saved.y === undefined || !isOnScreen(saved)) {
-      return { width: saved.width, height: saved.height };
-    }
-    return saved;
+    bounds = (saved.x === undefined || saved.y === undefined || !isOnScreen(saved))
+      ? { width: saved.width, height: saved.height }
+      : Object.assign({}, saved);
+  } else {
+    const { workAreaSize } = screen.getPrimaryDisplay();
+    bounds = {
+      width: Math.min(1400, Math.round(workAreaSize.width * 0.7)),
+      height: Math.min(900, Math.round(workAreaSize.height * 0.8)),
+    };
   }
-  const { workAreaSize } = screen.getPrimaryDisplay();
-  return {
-    width: Math.min(1400, Math.round(workAreaSize.width * 0.7)),
-    height: Math.min(900, Math.round(workAreaSize.height * 0.8)),
-  };
+
+  // Cascade additional windows so a new one doesn't land exactly on top of an
+  // existing one.
+  const open = BrowserWindow.getAllWindows().filter(w => !w.isDestroyed()).length;
+  if (open > 0) {
+    let base = bounds;
+    if (base.x === undefined || base.y === undefined) {
+      const wa = screen.getPrimaryDisplay().workArea;
+      base = Object.assign({}, bounds, { x: wa.x + 40, y: wa.y + 40 });
+    }
+    const cascaded = Object.assign({}, base, { x: base.x + 28 * open, y: base.y + 28 * open });
+    return isOnScreen(cascaded) ? cascaded : base;
+  }
+  return bounds;
 }
 
 function createWindow() {
@@ -103,23 +130,24 @@ app.whenReady().then(() => {
   let isQuitting = false
   app.on('before-quit', () => { isQuitting = true })
 
-  // (Re)create the main window and wire its per-window listeners. Called at
-  // startup and again from the 'activate' handler, so `mainWin` always points
-  // at a live window even after the window is closed and reopened.
-  function openMainWindow() {
-    mainWin = createWindow()
-    mainWin.on('ready-to-show', () => {
+  // Create a window and wire its per-window listeners. Each window is its own
+  // independent document — the scene, current file, dirty flag and title all
+  // live in that window's renderer. Only the first window at startup restores
+  // the most recent scene; windows opened afterwards start blank.
+  function createAppWindow(options) {
+    const autoLoadRecent = !!(options && options.autoLoadRecent)
+    const win = createWindow()
+    win.on('ready-to-show', () => {
       console.log('Window ready to be presented');
-      mainWin.show();
+      win.show();
     });
-    mainWin.webContents.on('did-finish-load', () => {
+    win.webContents.on('did-finish-load', () => {
       console.log('Page fully loaded');
-      //setTimeout(loadMostRecent, 1000)
-      loadMostRecent()
-      mainWin.webContents.send('set-resize-mode', store.get('resizeMode') || 'centered')
+      if (autoLoadRecent) loadMostRecent(win)
+      win.webContents.send('set-resize-mode', store.get('resizeMode') || 'centered')
     });
-    attachSaveOnClose(mainWin)
-    return mainWin
+    attachSaveOnClose(win)
+    return win
   }
 
   // Prompt to save before closing when the canvas has content. Handles both
@@ -159,21 +187,19 @@ app.whenReady().then(() => {
     })
   }
 
-  openMainWindow()
+  createAppWindow({ autoLoadRecent: true })
 
   contextMenu.append(new MenuItem({
     id: "close-edit-video", label: 'Close Edit Video', visible: false,
     click: (menuItem, browserWindow, event) => {
-      //mainWin.setAlwaysOnTop(menuItem.checked);
-      mainWin.webContents.send('close-edit-video')
+      sendTo(browserWindow, 'close-edit-video')
     }
   }));
 
   contextMenu.append(new MenuItem({
     id: "edit-video", label: 'Edit Video', visible: false,
     click: (menuItem, browserWindow, event) => {
-      //mainWin.setAlwaysOnTop(menuItem.checked);
-      mainWin.webContents.send('edit-video')
+      sendTo(browserWindow, 'edit-video')
     }
   }));
   contextMenu.append(new MenuItem({
@@ -182,23 +208,26 @@ app.whenReady().then(() => {
     click: (menuItem, browserWindow, event) => {
       console.log('click paste')
 
-      handlePaste();
+      handlePaste(browserWindow);
     }
   }));
   contextMenu.append(new MenuItem({ type: 'separator' }))
 
   contextMenu.append(new MenuItem({
+    id: 'always-on-top-ctx',
     label: 'Always on Top', type: 'checkbox', checked: true,
     click: (menuItem, browserWindow, event) => {
-      mainWin.setAlwaysOnTop(menuItem.checked);
+      const w = targetWindow(browserWindow)
+      if (w) w.setAlwaysOnTop(menuItem.checked);
     }
   }));
   globalShortcut.register('Control+Shift+I', () => {
-    mainWin.webContents.openDevTools()
+    const w = targetWindow()
+    if (w) w.webContents.openDevTools()
   });
   //globalShortcut.register('CommandOrControl+V', handlePaste)
 
-  function handlePaste() {
+  function handlePaste(win) {
     console.log('handlePaste')
 
     let payload = {}
@@ -232,7 +261,7 @@ app.whenReady().then(() => {
 
     console.log(formats)
     //console.log(payload)
-    mainWin.webContents.send('clipboard', JSON.stringify(payload)) // send to web page
+    sendTo(win, 'clipboard', JSON.stringify(payload)) // send to the requesting window
   }
   function addToRecent(filePath) {
     var recent = JSON.parse(store.get('recent') || "[]")
@@ -249,7 +278,7 @@ app.whenReady().then(() => {
       recentSubmenu.append(new MenuItem({
         label: filePath,
         click: (menuItem, browserWindow, event) => {
-          readAndLoadFilePath(menuItem.label)
+          readAndLoadFilePath(menuItem.label, false, browserWindow)
         }
       }))
     }
@@ -261,15 +290,15 @@ app.whenReady().then(() => {
       recentSubmenu.append(new MenuItem({
         label: recentfile,
         click: (menuItem, browserWindow, event) => {
-          readAndLoadFilePath(menuItem.label)
+          readAndLoadFilePath(menuItem.label, false, browserWindow)
         }
       }))
     }
   }
-  function loadMostRecent() {
+  function loadMostRecent(win) {
     var recent = JSON.parse(store.get('recent') || "[]")
     if (recent.length > 0)
-      readAndLoadFilePath(recent[recent.length - 1], true)
+      readAndLoadFilePath(recent[recent.length - 1], true, win)
   }
 
   function removeFromRecent(filePath) {
@@ -286,12 +315,15 @@ app.whenReady().then(() => {
   // isAutoLoad = true when loading the most-recent scene at startup: a missing or
   // unreadable file must never crash the app (files get moved/deleted), so prune
   // it and fall back to the next most-recent instead of throwing.
-  function readAndLoadFilePath(filePath, isAutoLoad = false) {
+  // The scene is loaded into `win` — the window that asked for it — so loading in
+  // one window never disturbs another.
+  function readAndLoadFilePath(filePath, isAutoLoad = false, win) {
+    const dest = targetWindow(win)
     fs.readFile(filePath, (err, data) => {
       if (err) {
         console.log('Could not open scene file, removing from recent:', filePath, err.code)
         removeFromRecent(filePath)
-        if (isAutoLoad) loadMostRecent()
+        if (isAutoLoad) loadMostRecent(dest)
         return
       }
       let newState
@@ -300,28 +332,29 @@ app.whenReady().then(() => {
       } catch (e) {
         console.log('Could not parse scene file, removing from recent:', filePath, e.message)
         removeFromRecent(filePath)
-        if (isAutoLoad) loadMostRecent()
+        if (isAutoLoad) loadMostRecent(dest)
         return
       }
-      if (mainWin && !mainWin.isDestroyed())
-        mainWin.webContents.send('load-scene', newState, filePath)
+      if (dest && !dest.isDestroyed())
+        dest.webContents.send('load-scene', newState, filePath)
     });
   }
 
   // Shared by both the right-click context menu and the application menu bar.
-  function loadSceneDialog() {
-    dialog.showOpenDialog({
+  function loadSceneDialog(win) {
+    const dest = targetWindow(win)
+    dialog.showOpenDialog(dest || undefined, {
       properties: ['openFile'],
       filters: [{ name: 'PurRef Gif Scene', extensions: ['purgif'] }]
     }).then(result => {
-      if (!result.canceled) readAndLoadFilePath(result.filePaths[0])
+      if (!result.canceled) readAndLoadFilePath(result.filePaths[0], false, dest)
     }).catch(err => console.log(err))
   }
   // Smart save. When the document already has a file and forceDialog is false,
   // write straight to it with no dialog; otherwise (new document, or Save As)
   // prompt for a location, defaulting to the current file's name.
   async function doSave(win, forceDialog) {
-    win = (win && !win.isDestroyed()) ? win : mainWin
+    win = targetWindow(win)
     if (!win || win.isDestroyed()) return false
     let info = null
     try { info = await win.webContents.executeJavaScript('window.myAPI && window.myAPI.getSaveInfo ? window.myAPI.getSaveInfo() : null') } catch (e) {}
@@ -351,7 +384,8 @@ app.whenReady().then(() => {
   // and the right-click menu checkboxes in sync (the toggle lives in both).
   function applyResizeMode(mode) {
     store.set('resizeMode', mode)
-    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('set-resize-mode', mode)
+    // Resize mode is a global preference: tell every open window.
+    BrowserWindow.getAllWindows().forEach(w => { if (!w.isDestroyed()) w.webContents.send('set-resize-mode', mode) })
     const checked = mode === 'zoom'
     const appMenuRef = Menu.getApplicationMenu()
     const appItem = appMenuRef && appMenuRef.getMenuItemById('toggle-zoom-resize')
@@ -415,10 +449,15 @@ app.whenReady().then(() => {
     click: (menuItem, browserWindow) => doSave(browserWindow, true)
   }));
   contextMenu.append(new MenuItem({
+    label: 'New Window',
+    accelerator: process.platform === 'darwin' ? 'Cmd+Shift+N' : 'Ctrl+Shift+N',
+    click: () => createAppWindow()
+  }));
+  contextMenu.append(new MenuItem({
     label: 'New Scene',
     accelerator: process.platform === 'darwin' ? 'Cmd+N' : 'Ctrl+N',
     click: (menuItem, browserWindow, event) => {
-      mainWin.webContents.send('new-scene');
+      sendTo(browserWindow, 'new-scene');
     }
   }));
   contextMenu.append(new MenuItem({
@@ -455,7 +494,8 @@ app.whenReady().then(() => {
     {
       label: 'File',
       submenu: [
-        { label: 'New Scene', accelerator: 'CmdOrCtrl+N', click: () => mainWin.webContents.send('new-scene') },
+        { label: 'New Window', accelerator: 'CmdOrCtrl+Shift+N', click: () => createAppWindow() },
+        { label: 'New Scene', accelerator: 'CmdOrCtrl+N', click: (item, win) => sendTo(win, 'new-scene') },
         { label: 'Load', accelerator: 'CmdOrCtrl+L', click: loadSceneDialog },
         { label: 'Save', accelerator: 'CmdOrCtrl+S', click: (item, win) => doSave(win, false) },
         { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', click: (item, win) => doSave(win, true) },
@@ -481,7 +521,7 @@ app.whenReady().then(() => {
         },
         { label: 'Minimize', accelerator: 'CmdOrCtrl+M', click: (item, win) => win && win.minimize() },
         { type: 'separator' },
-        { label: 'Always on Top', type: 'checkbox', checked: true, click: (item) => mainWin.setAlwaysOnTop(item.checked) },
+        { label: 'Always on Top', type: 'checkbox', checked: true, click: (item, win) => { const w = targetWindow(win); if (w) w.setAlwaysOnTop(item.checked) } },
         {
           // When checked, resizing the window scales the canvas content with it;
           // when unchecked, content keeps its size and just stays centered.
@@ -495,12 +535,14 @@ app.whenReady().then(() => {
   ])
   Menu.setApplicationMenu(appMenu)
 
-  if (process.argv.indexOf("debug") > -1)
-    mainWin.webContents.openDevTools()
-  
+  if (process.argv.indexOf("debug") > -1) {
+    const w = targetWindow()
+    if (w) w.webContents.openDevTools()
+  }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      openMainWindow()
+      createAppWindow({ autoLoadRecent: true })
     }
   })
 
@@ -516,6 +558,9 @@ app.whenReady().then(() => {
   ipcMain.on('show-context-menu', (event, menuType) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     console.log(menuType)
+    // The menu is shared across windows, so sync per-window state before showing.
+    const aot = contextMenu.getMenuItemById('always-on-top-ctx')
+    if (aot && win && !win.isDestroyed()) aot.checked = win.isAlwaysOnTop()
     contextMenu.getMenuItemById("edit-video").visible = false;
     contextMenu.getMenuItemById("close-edit-video").visible = false;
     if (menuType == 'youtube' || menuType == 'video') {
@@ -557,9 +602,12 @@ app.whenReady().then(() => {
   ipcMain.on('move-electron-window', (event, x, y, initPos) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win || win.isDestroyed()) return
+    // Use this window's own size rather than shared globals, so dragging one
+    // window can't resize another.
+    const b = win.getBounds()
     win.setBounds({
-      width: width,
-      height: height,
+      width: b.width,
+      height: b.height,
       x: x - initPos.x,
       y: y - initPos.y
     });
