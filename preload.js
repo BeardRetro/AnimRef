@@ -3,6 +3,29 @@ const {
   contextBridge,
   ipcMain
 } = require('electron')
+const fs = require('fs')
+
+// Audio is deliberately restricted to files already on disk: this app must not
+// become a way to pull audio off the internet. A path only counts as audio if it
+// has an audio extension AND exists locally, so a remote URL (which can reach the
+// media pipeline via the clipboard paste path in main.js) can never become audio.
+const AUDIO_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac']
+function isLocalAudioFile(p) {
+  if (typeof p !== 'string' || !p) return false
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(p)) return false // reject any URL outright
+  const lower = p.toLowerCase()
+  if (!AUDIO_EXTENSIONS.some(ext => lower.endsWith(ext))) return false
+  try { return fs.existsSync(p) } catch (e) { return false }
+}
+
+function makeTrack(p) {
+  return {
+    path: p,
+    name: p.replace(/^.*[\\/]/, ''),
+    loopStart: 0,
+    loopEnd: 100
+  }
+}
 
 // macOS: add a draggable strip along the top edge so the window can be moved
 // normally (in addition to right-drag). It is attached to <html> as a sibling
@@ -482,8 +505,12 @@ function getCenterOfWindowScaled() {
     centerY: (-state.translate.translateY / state.currentScale) + heightScaled
   };
 }
-function addMediaWithPath(path, type = 'img', loadedState) {
+function addMediaWithPath(path, type = 'img', loadedState, extra) {
   isNewElement = loadedState == null
+  // Captured before loadedState is defaulted below. Audio cards hold many tracks:
+  // on load they come from the saved element, on drop from the dropped batch.
+  let audioTracks = (loadedState && loadedState.tracks) || (extra && extra.tracks) || null
+  let audioActive = (loadedState && loadedState.activeTrack) || 0
   let centerWin = getCenterOfWindowScaled();
   loadedState = loadedState || { x: centerWin.centerX, y: centerWin.centerY, width: null, height: null }
   if (state.mode == 'init') init();
@@ -518,6 +545,23 @@ function addMediaWithPath(path, type = 'img', loadedState) {
     let srcElement = document.createElement('source')
     srcElement.src = path;
     mediaElement.appendChild(srcElement)
+  } else if (type == 'audio') {
+    // A playlist card: a fixed-size container standing in for non-visual media,
+    // following the same approach the youtube branch uses below.
+    if (!audioTracks || !audioTracks.length) audioTracks = [makeTrack(path)]
+    // Defence in depth: a scene file could be hand-edited or shared with a remote
+    // URL in its track list. Drop anything that isn't a local path so audio can
+    // never stream from the network. Missing local files are kept (they simply
+    // fail to decode) so a moved file doesn't silently vanish from the playlist.
+    audioTracks = audioTracks.filter(t => t && typeof t.path === 'string' && !/^[a-z][a-z0-9+.-]*:\/\//i.test(t.path))
+    mediaElement = document.createElement('div')
+    mediaElement.classList.add('audioCard')
+    mediaElement.style.width = (loadedState.width || 380) + "px";
+    mediaElement.style.height = (loadedState.height || 260) + "px";
+    if (isNewElement) {
+      loadedState.width = 380
+      loadedState.height = 260
+    }
   } else if (type == 'youtube') {
     //mediaElement = document.createElement('iframe')
     if (/youtube.com\/.*v=([^\?]*)/.test(path)) {
@@ -617,6 +661,12 @@ function addMediaWithPath(path, type = 'img', loadedState) {
     mediaObj.loopPairs = loadedState.loopPairs || [[0, 100]] // 0% & 100% positions for loop
     mediaObj.activeLoopPair = loadedState.activeLoopPair || 0
   }
+  if (type == 'audio') {
+    // Trim lives per track rather than in the card-level loopPairs used by
+    // video/youtube, since one card holds many sounds.
+    mediaObj.tracks = audioTracks
+    mediaObj.activeTrack = Math.min(audioActive, audioTracks.length - 1)
+  }
 
   state.elements.push(mediaObj)
   if (type == 'video') {
@@ -626,6 +676,7 @@ function addMediaWithPath(path, type = 'img', loadedState) {
   }
 
   itemHolder.appendChild(mediaElement)
+  if (type == 'audio') initAudioCard(mediaObj) // needs to be in the DOM to size the canvas
 
   //debugger;
   if (type == 'text') {
@@ -668,20 +719,416 @@ function adjustFontSize2(mediaElement, text, maxWidth = window.innerWidth) {
   return { width: newWidth, height: newHeight }
 }
 
+// --- Image export -----------------------------------------------------------
+// Prepares the page for webContents.capturePage(): hides app chrome that isn't
+// part of the board, drops selection outlines, and for 'canvas' mode frames all
+// content. endExport() puts the view back exactly as it was.
+let exportRestore = null
+
+function beginExport(mode) {
+  const bar = document.getElementById('macTitlebar')
+  exportRestore = {
+    barDisplay: bar ? bar.style.display : null,
+    currentScale: state.currentScale,
+    translate: Object.assign({}, state.translate)
+  }
+  if (bar) bar.style.display = 'none'
+  clearAllSelected()
+
+  if (mode === 'canvas' && state.elements.length) {
+    // Derive bounds from the elements themselves. state.workspaceRect only ever
+    // grows (resizeWorkspaceToFitObj uses min/max and never shrinks on delete),
+    // so it would overstate the content area.
+    let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity
+    for (const el of state.elements) {
+      const x = parseFloat(el.x) || 0
+      const y = parseFloat(el.y) || 0
+      const w = parseFloat(el.width) || parseFloat(el.element && el.element.width) || 0
+      const h = parseFloat(el.height) || parseFloat(el.element && el.element.height) || 0
+      x1 = Math.min(x1, x); y1 = Math.min(y1, y)
+      x2 = Math.max(x2, x + w); y2 = Math.max(y2, y + h)
+    }
+    if (isFinite(x1) && x2 > x1 && y2 > y1) {
+      const pad = 24
+      const vw = window.innerWidth, vh = window.innerHeight
+      const scale = Math.min((vw - pad * 2) / (x2 - x1), (vh - pad * 2) / (y2 - y1), 2)
+      const translateX = (vw - (x2 - x1) * scale) / 2 - x1 * scale
+      const translateY = (vh - (y2 - y1) * scale) / 2 - y1 * scale
+      // Apply directly rather than via updateScaleAndTranslate: that clamps the
+      // view using the stale workspaceRect and bails out above 2x, either of
+      // which could crop the export. state is left untouched so endExport can
+      // restore it cleanly.
+      document.body.style.transform =
+        'translate(' + translateX + 'px, ' + translateY + 'px) scale(' + scale + ')'
+      document.body.dataset.currentScale = scale
+      document.body.dataset.translateX = translateX
+      document.body.dataset.translateY = translateY
+      document.querySelector(':root').style.setProperty('--scale', scale)
+    }
+  }
+  // Give the compositor a frame to settle before the capture is taken.
+  return new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 120)))
+}
+
+function endExport() {
+  if (!exportRestore) return
+  const bar = document.getElementById('macTitlebar')
+  if (bar) bar.style.display = exportRestore.barDisplay || ''
+  updateScaleAndTranslate(exportRestore.currentScale, exportRestore.translate)
+  exportRestore = null
+}
+
+// --- Audio playlist cards ---------------------------------------------------
+// DOM references live in a WeakMap keyed by the card element rather than on the
+// mediaObj, so they never reach JSON.stringify when the scene is serialized.
+const audioCardRefs = new WeakMap()
+const waveformCache = new Map() // absolute path -> Float32Array of peaks
+const PEAK_BUCKETS = 1200
+let sharedAudioCtx = null
+let playingCardEl = null // only one sound plays at a time (per window)
+
+function getAudioCtx() {
+  if (!sharedAudioCtx) sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)()
+  return sharedAudioCtx
+}
+
+function activeTrackOf(mediaObj) {
+  return mediaObj.tracks && mediaObj.tracks[mediaObj.activeTrack]
+}
+
+function initAudioCard(mediaObj) {
+  const card = mediaObj.element
+  card.innerHTML = ''
+
+  // Everything interactive lives under .audioInteractive so interact.js can
+  // ignoreFrom it — otherwise dragging a trim handle would drag the whole card.
+  const ui = document.createElement('div')
+  ui.className = 'audioInteractive'
+
+  const list = document.createElement('div')
+  list.className = 'audioList'
+
+  const waveWrap = document.createElement('div')
+  waveWrap.className = 'waveWrap'
+  const canvas = document.createElement('canvas')
+  canvas.className = 'waveform'
+  const handleStart = document.createElement('div')
+  handleStart.className = 'trimHandle trimStart'
+  const handleEnd = document.createElement('div')
+  handleEnd.className = 'trimHandle trimEnd'
+  waveWrap.appendChild(canvas)
+  waveWrap.appendChild(handleStart)
+  waveWrap.appendChild(handleEnd)
+
+  const transport = document.createElement('div')
+  transport.className = 'audioTransport'
+  const playBtn = document.createElement('button')
+  playBtn.className = 'audioBtn'
+  playBtn.textContent = '▶'
+  const loopBtn = document.createElement('button')
+  loopBtn.className = 'audioBtn loopBtn'
+  loopBtn.textContent = '⟳'
+  const label = document.createElement('span')
+  label.className = 'audioLabel'
+  transport.appendChild(playBtn)
+  transport.appendChild(loopBtn)
+  transport.appendChild(label)
+
+  const audio = document.createElement('audio') // one per card; src swaps per track
+  audio.preload = 'metadata'
+  audio.autoplay = false
+
+  ui.appendChild(list)
+  ui.appendChild(waveWrap)
+  ui.appendChild(transport)
+  card.appendChild(ui)
+  card.appendChild(audio)
+
+  const refs = { audio, canvas, list, label, playBtn, loopBtn, waveWrap, handleStart, handleEnd, loop: true }
+  audioCardRefs.set(card, refs)
+  loopBtn.classList.add('on')
+
+  playBtn.addEventListener('click', (e) => { e.stopPropagation(); togglePlay(mediaObj) })
+  loopBtn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    refs.loop = !refs.loop
+    loopBtn.classList.toggle('on', refs.loop)
+  })
+
+  audio.addEventListener('timeupdate', () => onAudioProgress(mediaObj))
+  audio.addEventListener('ended', () => { if (playingCardEl === card) playingCardEl = null; playBtn.textContent = '▶' })
+  audio.addEventListener('loadedmetadata', () => { positionHandles(mediaObj); drawWaveform(mediaObj) })
+
+  attachTrimHandle(mediaObj, handleStart, 'loopStart')
+  attachTrimHandle(mediaObj, handleEnd, 'loopEnd')
+
+  // Redraw the waveform when the card is resized.
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver(() => { positionHandles(mediaObj); drawWaveform(mediaObj) })
+    ro.observe(card)
+  }
+
+  renderTrackList(mediaObj)
+  selectTrack(mediaObj, mediaObj.activeTrack || 0, false) // never autoplay on load
+}
+
+function renderTrackList(mediaObj) {
+  const refs = audioCardRefs.get(mediaObj.element)
+  if (!refs) return
+  refs.list.innerHTML = ''
+  if (!mediaObj.tracks.length) {
+    const empty = document.createElement('div')
+    empty.className = 'audioEmpty'
+    empty.textContent = 'Drop audio files here'
+    refs.list.appendChild(empty)
+    return
+  }
+  mediaObj.tracks.forEach((track, i) => {
+    const row = document.createElement('div')
+    row.className = 'audioRow' + (i === mediaObj.activeTrack ? ' selected' : '')
+    const name = document.createElement('span')
+    name.className = 'audioRowName'
+    name.textContent = track.name
+    name.title = track.path
+    const del = document.createElement('span')
+    del.className = 'audioRowDelete'
+    del.textContent = '×'
+    row.appendChild(name)
+    row.appendChild(del)
+    // Click a track to audition it: selects and plays, stopping anything else.
+    row.addEventListener('click', (e) => { e.stopPropagation(); selectTrack(mediaObj, i, true) })
+    del.addEventListener('click', (e) => { e.stopPropagation(); removeTrack(mediaObj, i) })
+    refs.list.appendChild(row)
+  })
+}
+
+function selectTrack(mediaObj, index, autoplay) {
+  const refs = audioCardRefs.get(mediaObj.element)
+  if (!refs || !mediaObj.tracks.length) return
+  mediaObj.activeTrack = Math.max(0, Math.min(index, mediaObj.tracks.length - 1))
+  const track = activeTrackOf(mediaObj)
+  refs.audio.src = track.path
+  refs.label.textContent = track.name
+  renderTrackList(mediaObj)
+  positionHandles(mediaObj)
+  drawWaveform(mediaObj)
+  if (autoplay) playCard(mediaObj)
+}
+
+function removeTrack(mediaObj, index) {
+  mediaObj.tracks.splice(index, 1)
+  if (!mediaObj.tracks.length) {
+    // Leave an empty card rather than removing the element: state.elements order
+    // is the z-index, so mid-array removal would break other elements. The empty
+    // card doubles as a drop target and can be deleted like any other element.
+    stopCard(mediaObj)
+    mediaObj.activeTrack = 0
+    const refs = audioCardRefs.get(mediaObj.element)
+    if (refs) {
+      refs.audio.removeAttribute('src')
+      refs.label.textContent = ''
+    }
+    renderTrackList(mediaObj)
+    drawWaveform(mediaObj)
+    return
+  }
+  selectTrack(mediaObj, Math.min(mediaObj.activeTrack, mediaObj.tracks.length - 1), false)
+}
+
+function appendTracksToCard(mediaObj, paths) {
+  const existing = new Set(mediaObj.tracks.map(t => t.path))
+  paths.forEach(p => { if (!existing.has(p)) mediaObj.tracks.push(makeTrack(p)) })
+  renderTrackList(mediaObj)
+}
+
+function playCard(mediaObj) {
+  const refs = audioCardRefs.get(mediaObj.element)
+  if (!refs) return
+  // Exclusive: starting one sound stops whatever else was playing.
+  if (playingCardEl && playingCardEl !== mediaObj.element) {
+    const other = audioCardRefs.get(playingCardEl)
+    if (other) { other.audio.pause(); other.playBtn.textContent = '▶' }
+  }
+  const track = activeTrackOf(mediaObj)
+  if (track && refs.audio.duration) {
+    const startS = (track.loopStart / 100) * refs.audio.duration
+    if (refs.audio.currentTime < startS) refs.audio.currentTime = startS
+  }
+  playingCardEl = mediaObj.element
+  refs.playBtn.textContent = '❚❚'
+  const p = refs.audio.play()
+  if (p && p.catch) p.catch(err => console.log('audio play failed', err))
+}
+
+function stopCard(mediaObj) {
+  const refs = audioCardRefs.get(mediaObj.element)
+  if (!refs) return
+  refs.audio.pause()
+  refs.playBtn.textContent = '▶'
+  if (playingCardEl === mediaObj.element) playingCardEl = null
+}
+
+function togglePlay(mediaObj) {
+  const refs = audioCardRefs.get(mediaObj.element)
+  if (!refs) return
+  if (refs.audio.paused) playCard(mediaObj)
+  else stopCard(mediaObj)
+}
+
+// Keep playback inside the track's trim region, mirroring how onPlayerProgress
+// constrains video via dataset.loopLeft/loopRight.
+function onAudioProgress(mediaObj) {
+  const refs = audioCardRefs.get(mediaObj.element)
+  const track = activeTrackOf(mediaObj)
+  if (!refs || !track || !refs.audio.duration) return
+  const dur = refs.audio.duration
+  const startS = (track.loopStart / 100) * dur
+  const endS = (track.loopEnd / 100) * dur
+  if (refs.audio.currentTime < startS - 0.05) refs.audio.currentTime = startS
+  if (refs.audio.currentTime >= endS) {
+    if (refs.loop) refs.audio.currentTime = startS
+    else stopCard(mediaObj)
+  }
+  drawWaveform(mediaObj)
+}
+
+function attachTrimHandle(mediaObj, handle, field) {
+  handle.addEventListener('mousedown', (downEvt) => {
+    downEvt.preventDefault()
+    downEvt.stopPropagation()
+    const refs = audioCardRefs.get(mediaObj.element)
+    if (!refs) return
+    const rect = refs.waveWrap.getBoundingClientRect()
+    const onMove = (moveEvt) => {
+      const track = activeTrackOf(mediaObj)
+      if (!track || rect.width <= 0) return
+      let pct = ((moveEvt.clientX - rect.left) / rect.width) * 100
+      pct = Math.max(0, Math.min(100, pct))
+      // Keep the handles ordered with a small minimum region.
+      if (field === 'loopStart') track.loopStart = Math.min(pct, track.loopEnd - 1)
+      else track.loopEnd = Math.max(pct, track.loopStart + 1)
+      positionHandles(mediaObj)
+      drawWaveform(mediaObj)
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove, true)
+      document.removeEventListener('mouseup', onUp, true)
+    }
+    document.addEventListener('mousemove', onMove, true)
+    document.addEventListener('mouseup', onUp, true)
+  })
+}
+
+function positionHandles(mediaObj) {
+  const refs = audioCardRefs.get(mediaObj.element)
+  const track = activeTrackOf(mediaObj)
+  if (!refs || !track) return
+  refs.handleStart.style.left = track.loopStart + '%'
+  refs.handleEnd.style.left = track.loopEnd + '%'
+}
+
+// Decode lazily and cache peaks per file, so switching tracks and resizing are
+// cheap and a long playlist doesn't decode everything up front.
+async function getPeaks(filePath) {
+  if (waveformCache.has(filePath)) return waveformCache.get(filePath)
+  const buf = await fs.promises.readFile(filePath)
+  const arrayBuf = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
+  const audioBuf = await getAudioCtx().decodeAudioData(arrayBuf)
+  const channel = audioBuf.getChannelData(0)
+  const block = Math.max(1, Math.floor(channel.length / PEAK_BUCKETS))
+  const peaks = new Float32Array(PEAK_BUCKETS)
+  for (let i = 0; i < PEAK_BUCKETS; i++) {
+    let max = 0
+    const start = i * block
+    for (let j = 0; j < block; j++) {
+      const v = Math.abs(channel[start + j] || 0)
+      if (v > max) max = v
+    }
+    peaks[i] = max
+  }
+  waveformCache.set(filePath, peaks)
+  return peaks
+}
+
+function drawWaveform(mediaObj) {
+  const refs = audioCardRefs.get(mediaObj.element)
+  if (!refs) return
+  const track = activeTrackOf(mediaObj)
+  const canvas = refs.canvas
+  const w = canvas.clientWidth, h = canvas.clientHeight
+  if (w <= 0 || h <= 0) return
+  const dpr = window.devicePixelRatio || 1
+  if (canvas.width !== Math.round(w * dpr)) canvas.width = Math.round(w * dpr)
+  if (canvas.height !== Math.round(h * dpr)) canvas.height = Math.round(h * dpr)
+  const ctx = canvas.getContext('2d')
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, w, h)
+  if (!track) return // empty card: nothing to draw
+
+  const peaks = waveformCache.get(track.path)
+  if (!peaks) {
+    ctx.fillStyle = '#666'
+    ctx.font = '11px -apple-system, sans-serif'
+    ctx.fillText('decoding…', 6, h / 2)
+    getPeaks(track.path)
+      .then(() => { if (activeTrackOf(mediaObj) === track) drawWaveform(mediaObj) })
+      .catch(err => {
+        console.log('waveform decode failed', track.path, err && err.message)
+        ctx.clearRect(0, 0, w, h)
+        ctx.fillStyle = '#7a4a4a'
+        ctx.fillText('could not read audio', 6, h / 2)
+      })
+    return
+  }
+
+  // Dim the trimmed-out regions so the loop region reads clearly.
+  const startX = (track.loopStart / 100) * w
+  const endX = (track.loopEnd / 100) * w
+  ctx.fillStyle = '#1a1a1a'
+  ctx.fillRect(0, 0, startX, h)
+  ctx.fillRect(endX, 0, w - endX, h)
+
+  const mid = h / 2
+  for (let x = 0; x < w; x++) {
+    const peak = peaks[Math.floor((x / w) * PEAK_BUCKETS)] || 0
+    const amp = peak * (h / 2) * 0.95
+    ctx.fillStyle = (x >= startX && x <= endX) ? '#5aa9c9' : '#3c4a50'
+    ctx.fillRect(x, mid - amp, 1, Math.max(1, amp * 2))
+  }
+
+  if (refs.audio.duration) {
+    const px = (refs.audio.currentTime / refs.audio.duration) * w
+    ctx.fillStyle = '#e0e0e0'
+    ctx.fillRect(px, 0, 1, h)
+  }
+}
+
 document.addEventListener('drop', (event) => {
   event.preventDefault();
   event.stopPropagation();
   // Todo check if file is valid
 
-
+  // Audio files collect into a single playlist card; everything else keeps the
+  // existing one-element-per-file behavior.
+  const audioPaths = []
+  const otherPaths = []
   for (const f of event.dataTransfer.files) {
-    // Using the path attribute to get absolute file path
     console.log('File Path of dragged files: ', f.path, state)
+    if (isLocalAudioFile(f.path)) audioPaths.push(f.path)
+    else otherPaths.push(f.path)
+  }
 
-    if (f.path.endsWith('.mp4')) {
-      addMediaWithPath(f.path, 'video')
-    } else
-      addMediaWithPath(f.path)
+  for (const p of otherPaths) {
+    if (p.endsWith('.mp4')) addMediaWithPath(p, 'video')
+    else addMediaWithPath(p)
+  }
+
+  if (audioPaths.length) {
+    // Dropping onto an existing card appends to its list; otherwise start a new one.
+    const cardEl = event.target && event.target.closest ? event.target.closest('.audioCard') : null
+    const cardObj = cardEl ? state.elements.find(e => e.element === cardEl) : null
+    if (cardObj) appendTracksToCard(cardObj, audioPaths)
+    else addMediaWithPath(audioPaths[0], 'audio', null, { tracks: audioPaths.map(makeTrack) })
   }
 });
 function init() {
@@ -790,7 +1237,9 @@ contextBridge.exposeInMainWorld('myAPI', {
   // Current-document info + a fresh dirty check, used by the main process for
   // smart save and the save-on-close prompt.
   getSaveInfo: () => ({ filePath: currentFilePath, name: documentName() }),
-  getIsDirty: () => !isLoading && sceneSignature() !== lastSavedSignature
+  getIsDirty: () => !isLoading && sceneSignature() !== lastSavedSignature,
+  beginExport: (mode) => beginExport(mode),
+  endExport: () => endExport()
 
 })
 
@@ -798,6 +1247,9 @@ interact('.draggable')
   .draggable({
     listeners: { move: dragMoveListener },
     inertia: false,
+    // Audio card controls (track list, waveform, trim handles, buttons) must not
+    // drag the card itself.
+    ignoreFrom: '.audioInteractive',
   }).on('tap', function (event) {
     var target = event.target
 

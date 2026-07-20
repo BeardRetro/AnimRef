@@ -380,6 +380,42 @@ app.whenReady().then(() => {
     }
   }
 
+  // Export the board to an image. mode 'canvas' frames all content first;
+  // 'view' captures the current framing as-is.
+  async function doExport(win, mode) {
+    win = targetWindow(win)
+    if (!win || win.isDestroyed()) return false
+    const suggested = mode === 'canvas' ? 'board.png' : 'view.png'
+    const result = await dialog.showSaveDialog(win, {
+      defaultPath: suggested,
+      filters: [
+        { name: 'PNG Image', extensions: ['png'] },
+        { name: 'JPEG Image', extensions: ['jpg', 'jpeg'] }
+      ]
+    })
+    if (result.canceled || !result.filePath) return false
+
+    let prepared = false
+    try {
+      await win.webContents.executeJavaScript(
+        'window.myAPI.beginExport(' + JSON.stringify(mode) + ')')
+      prepared = true
+      const image = await win.webContents.capturePage()
+      const isJpeg = /\.jpe?g$/i.test(result.filePath)
+      fs.writeFileSync(result.filePath, isJpeg ? image.toJPEG(90) : image.toPNG())
+      return true
+    } catch (err) {
+      console.log('export failed', err)
+      dialog.showErrorBox('Export failed', String((err && err.message) || err))
+      return false
+    } finally {
+      // Always restore the view, even if the capture or write failed.
+      if (prepared) {
+        try { await win.webContents.executeJavaScript('window.myAPI.endExport()') } catch (e) {}
+      }
+    }
+  }
+
   // Persist the resize mode, tell the renderer, and keep both the app menu bar
   // and the right-click menu checkboxes in sync (the toggle lives in both).
   function applyResizeMode(mode) {
@@ -449,6 +485,16 @@ app.whenReady().then(() => {
     click: (menuItem, browserWindow) => doSave(browserWindow, true)
   }));
   contextMenu.append(new MenuItem({
+    label: 'Export Canvas…',
+    accelerator: process.platform === 'darwin' ? 'Cmd+E' : 'Ctrl+E',
+    click: (menuItem, browserWindow) => doExport(browserWindow, 'canvas')
+  }));
+  contextMenu.append(new MenuItem({
+    label: 'Export Current View…',
+    accelerator: process.platform === 'darwin' ? 'Cmd+Shift+E' : 'Ctrl+Shift+E',
+    click: (menuItem, browserWindow) => doExport(browserWindow, 'view')
+  }));
+  contextMenu.append(new MenuItem({
     label: 'New Window',
     accelerator: process.platform === 'darwin' ? 'Cmd+Shift+N' : 'Ctrl+Shift+N',
     click: () => createAppWindow()
@@ -499,6 +545,9 @@ app.whenReady().then(() => {
         { label: 'Load', accelerator: 'CmdOrCtrl+L', click: loadSceneDialog },
         { label: 'Save', accelerator: 'CmdOrCtrl+S', click: (item, win) => doSave(win, false) },
         { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', click: (item, win) => doSave(win, true) },
+        { type: 'separator' },
+        { label: 'Export Canvas…', accelerator: 'CmdOrCtrl+E', click: (item, win) => doExport(win, 'canvas') },
+        { label: 'Export Current View…', accelerator: 'CmdOrCtrl+Shift+E', click: (item, win) => doExport(win, 'view') },
         { type: 'separator' },
         { label: 'Close', accelerator: 'CmdOrCtrl+W', click: (item, win) => win && win.close() },
         ...(isMac ? [] : [{ role: 'quit' }])

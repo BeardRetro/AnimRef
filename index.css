@@ -192,6 +192,122 @@ p {
 .hide {
   display: none !important;
 }
+/* --- Audio playlist card -------------------------------------------------- */
+.audioCard {
+  background: #232323;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  color: #cfcfcf;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.audioInteractive {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+}
+.audioList {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
+}
+.audioRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  border-bottom: 1px solid #2b2b2b;
+}
+.audioRow:hover {
+  background: #2c2c2c;
+}
+.audioRow.selected {
+  background: #2f4a55;
+  color: #ffffff;
+}
+.audioRowName {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.audioRowDelete {
+  flex: 0 0 auto;
+  opacity: 0.45;
+  padding: 0 4px;
+}
+.audioRowDelete:hover {
+  opacity: 1;
+  color: #e08585;
+}
+.audioEmpty {
+  padding: 12px 8px;
+  font-size: 12px;
+  color: #6f6f6f;
+  text-align: center;
+}
+.waveWrap {
+  position: relative;
+  flex: 0 0 64px;
+  background: #1a1a1a;
+  border-top: 1px solid #333;
+  border-bottom: 1px solid #333;
+}
+.waveform {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.trimHandle {
+  position: absolute;
+  top: 0;
+  width: 9px;
+  height: 100%;
+  margin-left: -4px;
+  cursor: ew-resize;
+  background: linear-gradient(to right, transparent 3px, #e0b050 3px, #e0b050 6px, transparent 6px);
+}
+.trimHandle:hover {
+  background: linear-gradient(to right, transparent 3px, #ffd070 3px, #ffd070 6px, transparent 6px);
+}
+.audioTransport {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+}
+.audioBtn {
+  background: #333;
+  color: #ddd;
+  border: 1px solid #454545;
+  border-radius: 4px;
+  min-width: 26px;
+  padding: 2px 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.audioBtn:hover {
+  background: #3e3e3e;
+}
+.audioBtn.loopBtn.on {
+  background: #2f4a55;
+  border-color: #5aa9c9;
+  color: #ffffff;
+}
+.audioLabel {
+  flex: 1 1 auto;
+  font-size: 11px;
+  color: #9a9a9a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 /* macOS draggable title strip (element injected from preload on darwin only).
    Spans the top edge and sits above everything; the native traffic-light
    buttons render over it and stay clickable. */
