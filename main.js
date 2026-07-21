@@ -145,6 +145,7 @@ app.whenReady().then(() => {
       console.log('Page fully loaded');
       if (autoLoadRecent) loadMostRecent(win)
       win.webContents.send('set-resize-mode', store.get('resizeMode') || 'centered')
+      win.webContents.send('set-grid', gridSettings())
     });
     attachSaveOnClose(win)
     return win
@@ -416,6 +417,36 @@ app.whenReady().then(() => {
     }
   }
 
+  // Grid snapping is a global preference like the resize mode: persist it, tell
+  // every open window, and keep the copies of the controls in both menus in sync.
+  const GRID_SIZES = [10, 25, 50, 100]
+  function gridSettings() {
+    return {
+      enabled: !!store.get('snapEnabled'),
+      size: store.get('gridSize') || 25
+    }
+  }
+  function applyGridSettings(next) {
+    const settings = Object.assign(gridSettings(), next)
+    store.set('snapEnabled', settings.enabled)
+    store.set('gridSize', settings.size)
+    BrowserWindow.getAllWindows().forEach(w => {
+      if (!w.isDestroyed()) w.webContents.send('set-grid', settings)
+    })
+    const appMenuRef = Menu.getApplicationMenu()
+    const sync = (menu, suffix) => {
+      if (!menu) return
+      const toggle = menu.getMenuItemById('toggle-snap' + suffix)
+      if (toggle) toggle.checked = settings.enabled
+      GRID_SIZES.forEach(s => {
+        const item = menu.getMenuItemById('grid-' + s + suffix)
+        if (item) item.checked = settings.size === s
+      })
+    }
+    sync(appMenuRef, '')
+    sync(contextMenu, '-ctx')
+  }
+
   // Persist the resize mode, tell the renderer, and keep both the app menu bar
   // and the right-click menu checkboxes in sync (the toggle lives in both).
   function applyResizeMode(mode) {
@@ -469,6 +500,25 @@ app.whenReady().then(() => {
     checked: (store.get('resizeMode') || 'centered') === 'zoom',
     click: (item) => applyResizeMode(item.checked ? 'zoom' : 'centered')
   }));
+  windowSubmenu.append(new MenuItem({ type: 'separator' }));
+  windowSubmenu.append(new MenuItem({
+    id: 'toggle-snap-ctx',
+    label: 'Snap to Grid',
+    type: 'checkbox',
+    checked: gridSettings().enabled,
+    click: (item) => applyGridSettings({ enabled: item.checked })
+  }));
+  const gridSubmenu = new Menu()
+  GRID_SIZES.forEach(s => {
+    gridSubmenu.append(new MenuItem({
+      id: 'grid-' + s + '-ctx',
+      label: s + ' px',
+      type: 'radio',
+      checked: gridSettings().size === s,
+      click: () => applyGridSettings({ size: s })
+    }))
+  })
+  windowSubmenu.append(new MenuItem({ label: 'Grid Size', type: 'submenu', submenu: gridSubmenu }));
   contextMenu.append(new MenuItem({
     label: 'Load',
     accelerator: process.platform === 'darwin' ? 'Cmd+L' : 'Ctrl+L',
@@ -578,6 +628,23 @@ app.whenReady().then(() => {
           label: 'Zoom Content When Resizing', type: 'checkbox',
           checked: (store.get('resizeMode') || 'centered') === 'zoom',
           click: (item) => applyResizeMode(item.checked ? 'zoom' : 'centered')
+        },
+        { type: 'separator' },
+        {
+          id: 'toggle-snap',
+          label: 'Snap to Grid', type: 'checkbox',
+          checked: gridSettings().enabled,
+          click: (item) => applyGridSettings({ enabled: item.checked })
+        },
+        {
+          label: 'Grid Size',
+          submenu: GRID_SIZES.map(s => ({
+            id: 'grid-' + s,
+            label: s + ' px',
+            type: 'radio',
+            checked: gridSettings().size === s,
+            click: () => applyGridSettings({ size: s })
+          }))
         }
       ]
     }

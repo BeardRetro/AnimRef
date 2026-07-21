@@ -719,6 +719,64 @@ function adjustFontSize2(mediaElement, text, maxWidth = window.innerWidth) {
   return { width: newWidth, height: newHeight }
 }
 
+// --- Grid snapping ----------------------------------------------------------
+// Snapping is applied in canvas coordinates (the same space element x/y live in),
+// so the grid stays fixed to the board and scales visually with zoom. It is opt-in
+// per call site: setTransformForElement is shared with scene loading, and snapping
+// there would shift every element off its saved position on open.
+let snapEnabled = false
+let gridSize = 25
+
+ipcRenderer.on('set-grid', (e, settings) => {
+  if (!settings) return
+  snapEnabled = !!settings.enabled
+  gridSize = settings.size || 25
+  if (gridOverlayVisible) updateGridOverlay()
+})
+
+function snapValue(v) {
+  return Math.round(v / gridSize) * gridSize
+}
+
+let gridOverlayVisible = false
+
+function ensureGridOverlay() {
+  let el = document.getElementById('gridOverlay')
+  if (!el) {
+    el = document.createElement('div')
+    el.id = 'gridOverlay'
+    // Sibling of <body> so the canvas pan/zoom transform doesn't move it; the
+    // lines are positioned from scale/translate instead, keeping them crisp.
+    document.documentElement.appendChild(el)
+  }
+  return el
+}
+
+function updateGridOverlay() {
+  const el = ensureGridOverlay()
+  const scale = parseFloat(document.body.dataset.currentScale) || 1
+  const tx = parseFloat(document.body.dataset.translateX) || 0
+  const ty = parseFloat(document.body.dataset.translateY) || 0
+  const spacing = gridSize * scale
+  // Too dense to be readable when zoomed far out — skip rather than draw mush.
+  if (spacing < 6) { el.style.display = 'none'; return }
+  el.style.backgroundSize = spacing + 'px ' + spacing + 'px'
+  el.style.backgroundPosition = (tx % spacing) + 'px ' + (ty % spacing) + 'px'
+  el.style.display = 'block'
+}
+
+function showGrid() {
+  if (!snapEnabled) return
+  gridOverlayVisible = true
+  updateGridOverlay()
+}
+
+function hideGrid() {
+  gridOverlayVisible = false
+  const el = document.getElementById('gridOverlay')
+  if (el) el.style.display = 'none'
+}
+
 // --- Image export -----------------------------------------------------------
 // Prepares the page for webContents.capturePage(): hides app chrome that isn't
 // part of the board, drops selection outlines, and for 'canvas' mode frames all
@@ -733,6 +791,7 @@ function beginExport(mode) {
     translate: Object.assign({}, state.translate)
   }
   if (bar) bar.style.display = 'none'
+  hideGrid() // never bake the snapping grid into an exported image
   clearAllSelected()
 
   if (mode === 'canvas' && state.elements.length) {
@@ -1197,6 +1256,7 @@ function updateScaleAndTranslate(newScale, newTranslate) {
   document.body.dataset.translateY = state.translate.translateY
   const ROOTCSS = document.querySelector(':root');
   ROOTCSS.style.setProperty('--scale', newScale);
+  if (gridOverlayVisible) updateGridOverlay() // keep grid aligned if the view moves
   //window.currentScale = state.currentScale;
 }
 
@@ -1245,7 +1305,8 @@ contextBridge.exposeInMainWorld('myAPI', {
 
 interact('.draggable')
   .draggable({
-    listeners: { move: dragMoveListener },
+    // The grid is only shown while something is actually being moved.
+    listeners: { start: showGrid, move: dragMoveListener, end: hideGrid },
     inertia: false,
     // Audio card controls (track list, waveform, trim handles, buttons) must not
     // drag the card itself.
@@ -1273,6 +1334,8 @@ interact('.selectedItem').resizable({
   enabled: true,
   margin: 4,
   listeners: [{
+    start: showGrid,
+    end: hideGrid,
     move(event) {
       if (isMouseInBlockingState()) return;
       var target = event.target
@@ -1282,7 +1345,7 @@ interact('.selectedItem').resizable({
       if (target.classList.contains('textElement')) {
         adjustFontSize2(target, target.innerText, event.rect.width)
       }
-      setTransformForElement(target.dataset.zIndex, event.deltaRect.left, event.deltaRect.top, event.rect.width, event.rect.height)
+      setTransformForElement(target.dataset.zIndex, event.deltaRect.left, event.deltaRect.top, event.rect.width, event.rect.height, true)
       forceRedraw()
     }
   }],
@@ -1349,7 +1412,7 @@ function dragMoveListener(event) {
   if (isMouseInBlockingState()) return;
   var target = event.target
   handleSelected(target, true)
-  setTransformForElement(target.dataset.zIndex, event.dx, event.dy)
+  setTransformForElement(target.dataset.zIndex, event.dx, event.dy, null, null, true)
   forceRedraw()
 }
 
@@ -1381,10 +1444,19 @@ function refreshWorkspace() {
 
 }
 
-function setTransformForElement(elementIndex, dx = 0, dy = 0, width = null, height = null) {
+// snap is opt-in and passed only from user drag/resize. Scene loading and initial
+// placement must never snap, or opening a saved board would move everything.
+function setTransformForElement(elementIndex, dx = 0, dy = 0, width = null, height = null, snap = false) {
   let elementObj = state.elements[elementIndex]
   let x = (parseFloat(elementObj.element.dataset.x) || 0) + (dx / state.currentScale)
   let y = (parseFloat(elementObj.element.dataset.y) || 0) + (dy / state.currentScale)
+
+  if (snap && snapEnabled) {
+    // Position only: dimensions are left alone so the aspect-ratio lock can't
+    // fight the grid and subtly distort images.
+    x = snapValue(x)
+    y = snapValue(y)
+  }
 
   elementObj.element.setAttribute('data-x', x)
   elementObj.element.setAttribute('data-y', y)

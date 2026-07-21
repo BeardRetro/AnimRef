@@ -192,6 +192,22 @@ p {
 .hide {
   display: none !important;
 }
+/* Snapping grid, shown only while dragging or resizing. Injected as a sibling of
+   <body> so the canvas transform doesn't move it; spacing and offset are set from
+   the current scale/translate so the lines stay crisp at any zoom. */
+#gridOverlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: none;
+  pointer-events: none;
+  z-index: 5;
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.08) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.08) 1px, transparent 1px);
+}
 /* --- Audio playlist card -------------------------------------------------- */
 .audioCard {
   background: #232323;
