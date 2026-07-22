@@ -25,7 +25,9 @@ let height = 300;
 // that triggered them. Menu handlers get the invoking window; fall back to the
 // focused window, then to any open window.
 function targetWindow(win) {
-  if (win && !win.isDestroyed()) return win;
+  // Guard against being handed something that isn't a BrowserWindow (e.g. a menu
+  // click passing the MenuItem as the first arg) — never crash the main process.
+  if (win && typeof win.isDestroyed === 'function' && !win.isDestroyed()) return win;
   const focused = BrowserWindow.getFocusedWindow();
   if (focused && !focused.isDestroyed()) return focused;
   return BrowserWindow.getAllWindows().find(w => !w.isDestroyed()) || null;
@@ -522,7 +524,7 @@ app.whenReady().then(() => {
   contextMenu.append(new MenuItem({
     label: 'Load',
     accelerator: process.platform === 'darwin' ? 'Cmd+L' : 'Ctrl+L',
-    click: loadSceneDialog
+    click: (menuItem, browserWindow) => loadSceneDialog(browserWindow)
   }));
   contextMenu.append(new MenuItem({
     label: 'Save',
@@ -592,7 +594,7 @@ app.whenReady().then(() => {
       submenu: [
         { label: 'New Window', accelerator: 'CmdOrCtrl+Shift+N', click: () => createAppWindow() },
         { label: 'New Scene', accelerator: 'CmdOrCtrl+N', click: (item, win) => sendTo(win, 'new-scene') },
-        { label: 'Load', accelerator: 'CmdOrCtrl+L', click: loadSceneDialog },
+        { label: 'Load', accelerator: 'CmdOrCtrl+L', click: (item, win) => loadSceneDialog(win) },
         { label: 'Save', accelerator: 'CmdOrCtrl+S', click: (item, win) => doSave(win, false) },
         { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', click: (item, win) => doSave(win, true) },
         { type: 'separator' },
