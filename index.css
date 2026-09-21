@@ -219,6 +219,74 @@ p {
     linear-gradient(to right, rgba(255, 255, 255, 0.08) 1px, transparent 1px),
     linear-gradient(to bottom, rgba(255, 255, 255, 0.08) 1px, transparent 1px);
 }
+/* --- Crop editor ---------------------------------------------------------- */
+/* Full-window overlay (sibling of <body>, so the canvas transform can't move it)
+   showing the original image fit to the screen with a draggable/resizable crop
+   box. The box's huge box-shadow dims everything outside it within the stage. */
+#cropOverlay {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 2147483646;
+  background: rgba(12, 12, 12, 0.92);
+  display: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+#cropOverlay.active { display: block; }
+#cropStage {
+  position: absolute;
+  overflow: hidden;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+}
+#cropImage {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+#cropRect {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid rgba(255, 255, 255, 0.95);
+  box-shadow: 0 0 0 100000px rgba(0, 0, 0, 0.6);
+  cursor: move;
+  touch-action: none;
+  background-image:
+    linear-gradient(to right, rgba(255,255,255,0.25) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255,255,255,0.25) 1px, transparent 1px);
+  background-size: 33.333% 33.333%;
+}
+#cropTools {
+  position: absolute;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+.cropHint {
+  color: #9a9a9a;
+  font-size: 12px;
+  margin-right: 8px;
+}
+.cropBtn {
+  background: #333;
+  color: #ddd;
+  border: 1px solid #4a4a4a;
+  border-radius: 5px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.cropBtn:hover { background: #3e3e3e; }
+.cropBtn.cropApply {
+  background: #2f4a55;
+  border-color: #5aa9c9;
+  color: #fff;
+}
+.cropBtn.cropApply:hover { background: #38596a; }
 /* --- Audio playlist card -------------------------------------------------- */
 .audioCard {
   background: #232323;

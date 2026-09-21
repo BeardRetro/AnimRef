@@ -374,6 +374,14 @@ function loadState(loadedState, filePath) {
 document.addEventListener('keydown', evt => {
   mouseObj.keys[evt.key] = true
 
+  // Crop editor owns the keyboard while open: Enter applies, Esc cancels, and
+  // nothing else (notably Delete/Backspace) may reach the canvas underneath.
+  if (state.mode === 'crop') {
+    if (evt.key === 'Enter') { evt.preventDefault(); applyCrop() }
+    else if (evt.key === 'Escape') { evt.preventDefault(); cancelCrop() }
+    return
+  }
+
 
   // On Mac keyboards the main deletion key reports as 'Backspace', not 'Delete'
   // (which is only the fn+Delete forward-delete). Accept both, but don't hijack
@@ -769,6 +777,12 @@ function addMediaWithPath(path, type = 'img', loadedState, extra) {
     mediaObj.tracks = audioTracks
     mediaObj.activeTrack = Math.min(audioActive, audioTracks.length - 1)
   }
+  // A cropped image keeps its uncropped source and crop rect so it can be
+  // re-cropped from the original later.
+  if (loadedState.originalPath) {
+    mediaObj.originalPath = loadedState.originalPath
+    if (loadedState.crop) mediaObj.crop = loadedState.crop
+  }
 
   state.elements.push(mediaObj)
   if (type == 'video') {
@@ -819,6 +833,184 @@ function adjustFontSize2(mediaElement, text, maxWidth = window.innerWidth) {
   mediaElement.style.height = newHeight + "px";
 
   return { width: newWidth, height: newHeight }
+}
+
+// --- Crop mode --------------------------------------------------------------
+// Double-clicking an image opens a full-window crop editor over the ORIGINAL
+// image (fit to the window, like the video editor), with a draggable/resizable
+// crop box. Applying renders the crop to a canvas and stores the cropped view in
+// `path` while keeping the uncropped source in `originalPath` plus the crop rect,
+// so double-clicking a cropped image reopens the crop on the full original.
+// Working from a data URL also sidesteps canvas tainting for file-backed images.
+let cropState = null // { mediaObj, naturalW, naturalH, scale, rect:{x,y,w,h}, prevMode }
+let lastTapEl = null, lastTapTime = 0
+
+// Manual double-tap detection: a tap re-classes the element (draggable ->
+// selectedItem), so interact's own doubletap can't be relied on across the pair.
+function noteTapForCrop(target) {
+  const now = Date.now()
+  if (target === lastTapEl && now - lastTapTime < 400) {
+    lastTapEl = null; lastTapTime = 0
+    if (target && target.tagName === 'IMG') beginCrop(target)
+    return
+  }
+  lastTapEl = target; lastTapTime = now
+}
+
+function ensureCropOverlay() {
+  let ov = document.getElementById('cropOverlay')
+  if (ov) return ov
+  ov = document.createElement('div'); ov.id = 'cropOverlay'
+  const stage = document.createElement('div'); stage.id = 'cropStage'
+  const img = document.createElement('img'); img.id = 'cropImage'
+  const rect = document.createElement('div'); rect.id = 'cropRect'
+  stage.appendChild(img); stage.appendChild(rect)
+  const tools = document.createElement('div'); tools.id = 'cropTools'
+  const hint = document.createElement('span'); hint.className = 'cropHint'
+  hint.textContent = 'Drag the box to crop  ·  Shift locks proportions  ·  Enter applies  ·  Esc cancels'
+  const cancel = document.createElement('button'); cancel.className = 'cropBtn'; cancel.textContent = '✕ Cancel'
+  const apply = document.createElement('button'); apply.className = 'cropBtn cropApply'; apply.textContent = '✓ Apply'
+  tools.appendChild(hint); tools.appendChild(cancel); tools.appendChild(apply)
+  ov.appendChild(stage); ov.appendChild(tools)
+  // Sibling of <body> so the canvas pan/zoom transform can't move it.
+  document.documentElement.appendChild(ov)
+  cancel.addEventListener('click', e => { e.stopPropagation(); cancelCrop() })
+  apply.addEventListener('click', e => { e.stopPropagation(); applyCrop() })
+  // Don't let scroll/pinch over the editor zoom the canvas underneath.
+  ov.addEventListener('wheel', e => { e.preventDefault(); e.stopPropagation() }, { passive: false })
+
+  interact('#cropRect')
+    .draggable({
+      listeners: { move(e) { if (!cropState) return; cropState.rect.x += e.dx; cropState.rect.y += e.dy; layoutCropRect() } },
+      inertia: false
+    })
+    .resizable({
+      edges: { left: true, right: true, top: true, bottom: true },
+      margin: 8,
+      listeners: {
+        start(e) {
+          // Remember the box's proportions so Shift can lock to them mid-drag.
+          if (cropState) cropState.resizeAspect = cropState.rect.w / cropState.rect.h
+        },
+        move(e) {
+          if (!cropState) return
+          const r = cropState.rect
+          const right = r.x + r.w, bottom = r.y + r.h // opposite-edge anchors
+          r.x += e.deltaRect.left
+          r.y += e.deltaRect.top
+          r.w = e.rect.width
+          r.h = e.rect.height
+          if (e.shiftKey && cropState.resizeAspect) {
+            // Lock proportions: the dragged axis leads, the other follows. Then
+            // re-anchor the non-dragged edges so the edge under the cursor stays
+            // put instead of the box drifting.
+            const a = cropState.resizeAspect
+            const horiz = e.edges.left || e.edges.right
+            const vert = e.edges.top || e.edges.bottom
+            if (vert && !horiz) r.w = r.h * a
+            else r.h = r.w / a
+            if (e.edges.left) r.x = right - r.w
+            if (e.edges.top) r.y = bottom - r.h
+          }
+          layoutCropRect()
+        }
+      }
+    })
+  return ov
+}
+
+function layoutCropRect() {
+  const ov = document.getElementById('cropOverlay')
+  const rectEl = document.getElementById('cropRect')
+  if (!cropState || !ov || !rectEl) return
+  const sw = cropState.naturalW * cropState.scale, sh = cropState.naturalH * cropState.scale
+  const r = cropState.rect
+  r.w = Math.max(10, Math.min(r.w, sw)); r.h = Math.max(10, Math.min(r.h, sh))
+  r.x = Math.max(0, Math.min(r.x, sw - r.w)); r.y = Math.max(0, Math.min(r.y, sh - r.h))
+  rectEl.style.left = r.x + 'px'; rectEl.style.top = r.y + 'px'
+  rectEl.style.width = r.w + 'px'; rectEl.style.height = r.h + 'px'
+}
+
+// The uncropped source as a data URL (reading file-backed images via fs).
+function originalSourceFor(mediaObj) {
+  if (mediaObj.originalPath) return mediaObj.originalPath
+  const p = String(mediaObj.path || '')
+  if (p.startsWith('data:')) return p
+  return inlineImageFile(p) // throws if the file is missing
+}
+
+function beginCrop(imgEl) {
+  const mediaObj = state.elements.find(e => e.element === imgEl)
+  if (!mediaObj || cropState) return
+  let src
+  try { src = originalSourceFor(mediaObj) } catch (e) {
+    console.log('cannot crop: source image unavailable', e && e.message); return
+  }
+  const ov = ensureCropOverlay()
+  const cropImg = document.getElementById('cropImage')
+  cropImg.onload = () => {
+    const nw = cropImg.naturalWidth, nh = cropImg.naturalHeight
+    if (!nw || !nh) { cropState = null; ov.classList.remove('active'); return }
+    // Fit the original into the window, leaving room for the toolbar.
+    const availW = window.innerWidth - 80, availH = window.innerHeight - 150
+    const scale = Math.min(availW / nw, availH / nh, 4)
+    const sw = nw * scale, sh = nh * scale
+    const stage = document.getElementById('cropStage')
+    stage.style.width = sw + 'px'; stage.style.height = sh + 'px'
+    stage.style.left = ((window.innerWidth - sw) / 2) + 'px'
+    stage.style.top = (40 + Math.max(0, (availH - sh) / 2)) + 'px'
+    const c = mediaObj.crop
+    cropState = {
+      mediaObj, naturalW: nw, naturalH: nh, scale,
+      originalSrc: src,
+      prevMode: state.mode,
+      rect: c ? { x: c.x * scale, y: c.y * scale, w: c.w * scale, h: c.h * scale }
+              : { x: 0, y: 0, w: sw, h: sh }
+    }
+    state.mode = 'crop'
+    layoutCropRect()
+  }
+  cropImg.src = src
+  ov.classList.add('active')
+}
+
+function endCrop() {
+  const ov = document.getElementById('cropOverlay')
+  if (ov) ov.classList.remove('active')
+  if (cropState) state.mode = cropState.prevMode || 'standard'
+  cropState = null
+}
+
+function cancelCrop() { endCrop() }
+
+function applyCrop() {
+  if (!cropState) return
+  const { mediaObj, scale, rect, originalSrc } = cropState
+  const cropImg = document.getElementById('cropImage')
+  // Convert the box from display px back to original-image px.
+  const ox = Math.round(rect.x / scale), oy = Math.round(rect.y / scale)
+  const ow = Math.max(1, Math.round(rect.w / scale)), oh = Math.max(1, Math.round(rect.h / scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = ow; canvas.height = oh
+  canvas.getContext('2d').drawImage(cropImg, ox, oy, ow, oh, 0, 0, ow, oh)
+  // Keep JPEG sources as JPEG so photo crops don't balloon the scene file.
+  const isJpeg = /^data:image\/jpe?g/i.test(originalSrc)
+  const out = isJpeg ? canvas.toDataURL('image/jpeg', 0.92) : canvas.toDataURL('image/png')
+
+  mediaObj.originalPath = originalSrc
+  mediaObj.crop = { x: ox, y: oy, w: ow, h: oh }
+  mediaObj.path = out
+  mediaObj.type = 'dataURL'
+  // Keep the element's on-canvas width; adjust height to the new aspect so the
+  // image doesn't jump in size when the crop changes its proportions.
+  const curW = parseFloat(mediaObj.width) || parseFloat(mediaObj.element.width) || ow
+  const newH = curW * (oh / ow)
+  mediaObj.width = curW; mediaObj.height = newH
+  const el = mediaObj.element
+  el.width = curW; el.height = newH
+  el.style.width = curW + 'px'; el.style.height = newH + 'px'
+  el.src = out
+  endCrop()
 }
 
 // --- Grid snapping ----------------------------------------------------------
@@ -1457,6 +1649,7 @@ interact('.draggable')
     var target = event.target
 
     handleSelected(target)
+    noteTapForCrop(target) // second quick tap on an image opens the crop editor
     //
     event.preventDefault()
   })
@@ -1510,6 +1703,7 @@ interact('.selectedItem').resizable({
 
   var target = event.target
   handleSelected(target)
+  noteTapForCrop(target)
   //
   event.preventDefault()
 })
