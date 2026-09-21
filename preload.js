@@ -359,6 +359,12 @@ function loadState(loadedState, filePath) {
     for (var i in loadedState.elements) {
       addMediaWithPath(loadedState.elements[i].path, loadedState.elements[i].type, loadedState.elements[i])
     }
+    // Open with the whole board in view rather than restoring the saved
+    // scale/translate: a saved view can be zoomed or panned somewhere the content
+    // isn't (e.g. 1% zoom with everything rendering as specks), which looks like
+    // an empty file. Element sizes come from the saved data, so this works before
+    // the images have finished decoding. Cmd+0 re-fits at any time.
+    fitToContent()
     markSaved(filePath) // the just-loaded scene is the clean baseline
     isLoading = false
     ipcRenderer.send('loaded-state', filePath)
@@ -1570,6 +1576,49 @@ function initWorkspace() {
     y2: 0
   }
 }
+
+// resizeWorkspaceToFitObj only ever grows the rect, so it overstates the content
+// area after elements are deleted or moved back. Rebuild it from the elements
+// themselves; the pan clamp in clampWorkspaceTranslate depends on it being real.
+function recomputeWorkspace() {
+  if (!state.elements.length) {
+    initWorkspace()
+    refreshWorkspace()
+    return null
+  }
+  let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity
+  for (const el of state.elements) {
+    const x = parseFloat(el.x) || 0
+    const y = parseFloat(el.y) || 0
+    const w = parseFloat(el.width) || parseFloat(el.element && el.element.width) || 0
+    const h = parseFloat(el.height) || parseFloat(el.element && el.element.height) || 0
+    x1 = Math.min(x1, x); y1 = Math.min(y1, y)
+    x2 = Math.max(x2, x + w); y2 = Math.max(y2, y + h)
+  }
+  if (!isFinite(x1)) return null
+  state.workspaceRect = { x1, y1, x2, y2 }
+  refreshWorkspace()
+  return state.workspaceRect
+}
+
+// Frame everything on screen. The main way back when the view has been zoomed or
+// panned somewhere content isn't — at very low zoom, elements are placed at huge
+// canvas coordinates and render as specks, which looks like an empty board.
+function fitToContent() {
+  const r = recomputeWorkspace()
+  if (!r || r.x2 <= r.x1 || r.y2 <= r.y1) {
+    updateScaleAndTranslate(1, { translateX: 0, translateY: 0 })
+    return
+  }
+  const pad = 40
+  const vw = window.innerWidth, vh = window.innerHeight
+  const scale = Math.max(0.01, Math.min((vw - pad * 2) / (r.x2 - r.x1), (vh - pad * 2) / (r.y2 - r.y1), 2))
+  const translateX = (vw - (r.x2 - r.x1) * scale) / 2 - r.x1 * scale
+  const translateY = (vh - (r.y2 - r.y1) * scale) / 2 - r.y1 * scale
+  updateScaleAndTranslate(scale, { translateX, translateY })
+}
+
+ipcRenderer.on('fit-to-content', () => fitToContent())
 
 function refreshWorkspace() {
   const element = document.getElementById('workspaceBox');

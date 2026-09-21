@@ -504,6 +504,12 @@ app.whenReady().then(() => {
   }));
   windowSubmenu.append(new MenuItem({ type: 'separator' }));
   windowSubmenu.append(new MenuItem({
+    label: 'Fit to Content',
+    accelerator: process.platform === 'darwin' ? 'Cmd+0' : 'Ctrl+0',
+    click: (menuItem, browserWindow) => sendTo(browserWindow, 'fit-to-content')
+  }));
+  windowSubmenu.append(new MenuItem({ type: 'separator' }));
+  windowSubmenu.append(new MenuItem({
     id: 'toggle-snap-ctx',
     label: 'Snap to Grid',
     type: 'checkbox',
@@ -621,6 +627,8 @@ app.whenReady().then(() => {
           click: (item, win) => { if (win) win.isMaximized() ? win.unmaximize() : win.maximize() }
         },
         { label: 'Minimize', accelerator: 'CmdOrCtrl+M', click: (item, win) => win && win.minimize() },
+        { type: 'separator' },
+        { label: 'Fit to Content', accelerator: 'CmdOrCtrl+0', click: (item, win) => sendTo(win, 'fit-to-content') },
         { type: 'separator' },
         { label: 'Always on Top', type: 'checkbox', checked: true, click: (item, win) => { const w = targetWindow(win); if (w) w.setAlwaysOnTop(item.checked) } },
         {
