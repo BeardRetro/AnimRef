@@ -229,11 +229,28 @@ p {
   color: #cfcfcf;
   -webkit-user-select: none;
   user-select: none;
-}
-.audioInteractive {
   display: flex;
   flex-direction: column;
-  height: 100%;
+}
+.audioHeader {
+  flex: 0 0 20px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  background: #2b2b2b;
+  border-bottom: 1px solid #3a3a3a;
+  cursor: move;
+}
+.audioGrip {
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: #8a8a8a;
+}
+.audioInteractive {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   width: 100%;
 }
 .audioList {

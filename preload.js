@@ -955,8 +955,20 @@ function initAudioCard(mediaObj) {
   const card = mediaObj.element
   card.innerHTML = ''
 
+  // A drag handle: the interactive controls fill the whole card, so without a
+  // dedicated non-interactive strip there would be nothing left to grab to move
+  // the card. This header sits outside .audioInteractive so it stays draggable.
+  const header = document.createElement('div')
+  header.className = 'audioHeader'
+  const grip = document.createElement('span')
+  grip.className = 'audioGrip'
+  grip.textContent = '⠿ Audio'
+  header.appendChild(grip)
+  card.appendChild(header)
+
   // Everything interactive lives under .audioInteractive so interact.js can
-  // ignoreFrom it — otherwise dragging a trim handle would drag the whole card.
+  // ignoreFrom it — otherwise dragging a trim handle or a track row would drag
+  // the whole card.
   const ui = document.createElement('div')
   ui.className = 'audioInteractive'
 
@@ -1572,18 +1584,19 @@ function refreshWorkspace() {
 // placement must never snap, or opening a saved board would move everything.
 function setTransformForElement(elementIndex, dx = 0, dy = 0, width = null, height = null, snap = false) {
   let elementObj = state.elements[elementIndex]
-  let x = (parseFloat(elementObj.element.dataset.x) || 0) + (dx / state.currentScale)
-  let y = (parseFloat(elementObj.element.dataset.y) || 0) + (dy / state.currentScale)
+  // Accumulate the true, unsnapped position in the dataset. Storing the snapped
+  // value here would discard any drag movement smaller than the grid each frame,
+  // so only a fast flick (a delta bigger than half a cell) would ever move the
+  // element. Snapping is applied only to what gets displayed and saved.
+  let rawX = (parseFloat(elementObj.element.dataset.x) || 0) + (dx / state.currentScale)
+  let rawY = (parseFloat(elementObj.element.dataset.y) || 0) + (dy / state.currentScale)
+  elementObj.element.setAttribute('data-x', rawX)
+  elementObj.element.setAttribute('data-y', rawY)
 
-  if (snap && snapEnabled) {
-    // Position only: dimensions are left alone so the aspect-ratio lock can't
-    // fight the grid and subtly distort images.
-    x = snapValue(x)
-    y = snapValue(y)
-  }
-
-  elementObj.element.setAttribute('data-x', x)
-  elementObj.element.setAttribute('data-y', y)
+  // Position only: dimensions are left alone so the aspect-ratio lock can't
+  // fight the grid and subtly distort images.
+  let x = (snap && snapEnabled) ? snapValue(rawX) : rawX
+  let y = (snap && snapEnabled) ? snapValue(rawY) : rawY
   elementObj.x = x
   elementObj.y = y
 
