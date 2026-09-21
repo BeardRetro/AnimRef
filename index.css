@@ -192,6 +192,17 @@ p {
 .hide {
   display: none !important;
 }
+/* A reference whose source file is gone (e.g. a browser temp file that was
+   cleaned up). Shows the filename (via the img's alt text) in a dashed box so
+   it can be identified and re-sourced instead of appearing blank. */
+.missingRef {
+  border: 2px dashed #6a6a6a;
+  background: #2a2a2a;
+  box-sizing: border-box;
+  color: #b0b0b0;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 12px;
+}
 /* Snapping grid, shown only while dragging or resizing. Injected as a sibling of
    <body> so the canvas transform doesn't move it; spacing and offset are set from
    the current scale/translate so the lines stay crisp at any zoom. */

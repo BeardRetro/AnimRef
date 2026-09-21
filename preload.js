@@ -4,6 +4,8 @@ const {
   ipcMain
 } = require('electron')
 const fs = require('fs')
+const nodePath = require('path')
+const { execFile } = require('child_process')
 
 // Audio is deliberately restricted to files already on disk: this app must not
 // become a way to pull audio off the internet. A path only counts as audio if it
@@ -25,6 +27,70 @@ function makeTrack(p) {
     loopStart: 0,
     loopEnd: 100
   }
+}
+
+const os = require('os')
+const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.avif', '.webp', '.svg', '.bmp', '.tiff', '.tif']
+const IMAGE_MIME = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+  '.avif': 'image/avif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.bmp': 'image/bmp',
+  '.tiff': 'image/tiff', '.tif': 'image/tiff'
+}
+function imageExt(p) {
+  const m = String(p).toLowerCase().match(/\.[a-z0-9]+$/)
+  return m && IMAGE_EXTENSIONS.includes(m[0]) ? m[0] : null
+}
+// Browsers drop images as throwaway files under the OS temp dir, which get
+// cleaned up and break the reference. Detect that so those can be inlined.
+function isEphemeralPath(p) {
+  try {
+    const real = fs.realpathSync(p)
+    const tmp = fs.realpathSync(os.tmpdir())
+    if (real === tmp || real.startsWith(tmp + '/')) return true
+  } catch (e) { /* fall through to string checks */ }
+  return /(\/mozDraggedFiles\/|\/var\/folders\/|\/T\/|\/tmp\/|\/Temp\/|\/Caches\/)/i.test(String(p))
+}
+// Read an image into a self-contained data URL so it survives even if the source
+// file is deleted. Same storage shape as pasted images already use.
+function inlineImageFile(p) {
+  const ext = imageExt(p) || '.png'
+  const mime = IMAGE_MIME[ext] || 'image/png'
+  return 'data:' + mime + ';base64,' + fs.readFileSync(p).toString('base64')
+}
+
+// HEIC/HEIF cannot be displayed at all: the pixels are HEVC-encoded and Chromium
+// ships no HEVC image decoder, so it fails from a file path, from a data URL, and
+// through Electron's own nativeImage. macOS decodes it via ImageIO, which the
+// built-in `sips` tool exposes, so convert to JPEG first and embed that. This
+// applies to every HEIC regardless of where it came from, since even a permanent
+// local one would never render.
+const HEIC_EXTENSIONS = ['.heic', '.heif']
+function isHeicPath(p) {
+  const m = String(p).toLowerCase().match(/\.[a-z0-9]+$/)
+  return !!(m && HEIC_EXTENSIONS.includes(m[0]))
+}
+function convertHeicToDataUrl(p) {
+  return new Promise((resolve, reject) => {
+    if (process.platform !== 'darwin') {
+      return reject(new Error('HEIC needs macOS (sips) to decode'))
+    }
+    const out = nodePath.join(
+      require('os').tmpdir(),
+      'animref-heic-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.jpg'
+    )
+    // quality 90: these are reference images, and lossless PNG from a phone photo
+    // would bloat the scene file enormously.
+    execFile('/usr/bin/sips',
+      ['-s', 'format', 'jpeg', '-s', 'formatOptions', '90', p, '--out', out],
+      (err) => {
+        try {
+          if (!fs.existsSync(out)) return reject(err || new Error('sips produced no output'))
+          const b64 = fs.readFileSync(out).toString('base64')
+          try { fs.unlinkSync(out) } catch (e) {}
+          resolve('data:image/jpeg;base64,' + b64)
+        } catch (e) { reject(e) }
+      })
+  })
 }
 
 // macOS: add a draggable strip along the top edge so the window can be moved
@@ -96,9 +162,16 @@ let lastSavedSignature = '[]'
 function sceneSignature() {
   try {
     return JSON.stringify(state.elements.map(e => {
-      const c = Object.assign({}, e)
-      delete c.element
-      return c
+      const p = e.path || ''
+      return {
+        t: e.type, x: e.x, y: e.y, w: e.width, h: e.height,
+        // Long inline data URLs are represented by length + a short prefix rather
+        // than the whole blob, so this (run every 400ms) stays cheap now that
+        // dropped images can be many MB of inlined base64.
+        p: p.length > 128 ? p.length + ':' + p.slice(0, 48) : p,
+        lp: e.loopPairs, al: e.activeLoopPair, at: e.activeTrack,
+        tr: e.tracks && e.tracks.map(t => (t.path || '').length + ':' + (t.path || '').slice(0, 40) + ':' + t.loopStart + '-' + t.loopEnd)
+      }
     }))
   } catch (err) {
     return 'sig-error-' + state.elements.length
@@ -489,10 +562,18 @@ ipcRenderer.on('load-scene', (event, newState, filePath) => {
 ipcRenderer.on('clipboard', (event, msg) => {
   let payload = JSON.parse(msg);
   console.log(payload)
-  if (/youtube.com\/.*v=([^\?]*)/.test(payload[payload.type])) {
-    addMediaWithPath(payload[payload.type], "youtube")
+  // When the clipboard holds nothing we recognise, handlePaste sends an empty
+  // payload. Without this guard payload[payload.type] is undefined and we'd add
+  // a pathless element that renders as an invisible empty box.
+  const value = (payload && payload.type) ? payload[payload.type] : null
+  if (!value) {
+    console.log('paste ignored: clipboard has nothing usable', payload)
+    return
+  }
+  if (/youtube.com\/.*v=([^\?]*)/.test(value)) {
+    addMediaWithPath(value, "youtube")
   } else
-    addMediaWithPath(payload[payload.type], payload.type)
+    addMediaWithPath(value, payload.type)
 })
 function getCenterOfWindowScaled() {
   const width = window.innerWidth;
@@ -506,6 +587,12 @@ function getCenterOfWindowScaled() {
   };
 }
 function addMediaWithPath(path, type = 'img', loadedState, extra) {
+  // Last line of defence: never create an element with no source. Audio cards are
+  // exempt because they carry their sources in a tracks array instead.
+  if (!path && type !== 'audio') {
+    console.log('addMediaWithPath ignored: no source path for type', type)
+    return
+  }
   isNewElement = loadedState == null
   // Captured before loadedState is defaulted below. Audio cards hold many tracks:
   // on load they come from the saved element, on drop from the dropped batch.
@@ -535,6 +622,15 @@ function addMediaWithPath(path, type = 'img', loadedState, extra) {
       resizeWorkspaceToFitObj(loadedState.x, loadedState.y, width, height)
 
     })
+    // For file-backed images (not inline data URLs), show the filename if the
+    // source is gone, so a broken reference is identifiable and re-sourceable
+    // rather than a blank box.
+    if (!String(path).startsWith('data:')) {
+      mediaElement.alt = String(path).replace(/^.*[\\/]/, '')
+      mediaElement.addEventListener('error', function () {
+        mediaElement.classList.add('missingRef')
+      })
+    }
     mediaElement.src = path;
   } else if (type == 'video') {
     mediaElement = document.createElement('video')
@@ -1170,16 +1266,44 @@ document.addEventListener('drop', (event) => {
   // Audio files collect into a single playlist card; everything else keeps the
   // existing one-element-per-file behavior.
   const audioPaths = []
+  const heicPaths = []
   const otherPaths = []
   for (const f of event.dataTransfer.files) {
     console.log('File Path of dragged files: ', f.path, state)
+    // Some drag sources hand over a file with no filesystem path. Skip those
+    // rather than adding an element with an undefined source (an empty box).
+    if (!f.path || typeof f.path !== 'string') {
+      console.log('drop ignored: dragged item has no file path', f && f.name)
+      continue
+    }
     if (isLocalAudioFile(f.path)) audioPaths.push(f.path)
+    else if (isHeicPath(f.path)) heicPaths.push(f.path)
     else otherPaths.push(f.path)
   }
 
+  if (heicPaths.length) {
+    // Converting shells out to sips, so do it off the drop handler and add each
+    // one as it finishes, keeping the order they were dropped in.
+    ;(async () => {
+      for (const p of heicPaths) {
+        try {
+          addMediaWithPath(await convertHeicToDataUrl(p), 'dataURL')
+        } catch (e) {
+          console.log('could not convert HEIC:', p, e && e.message)
+        }
+      }
+    })()
+  }
+
   for (const p of otherPaths) {
-    if (p.endsWith('.mp4')) addMediaWithPath(p, 'video')
-    else addMediaWithPath(p)
+    if (p.endsWith('.mp4')) { addMediaWithPath(p, 'video'); continue }
+    // A browser-dragged image lives in a temp file that will be cleaned up, so
+    // inline it into the scene. Local images the user owns keep their path.
+    if (imageExt(p) && isEphemeralPath(p)) {
+      try { addMediaWithPath(inlineImageFile(p), 'dataURL'); continue }
+      catch (e) { console.log('could not inline dropped image, keeping path:', p, e && e.message) }
+    }
+    addMediaWithPath(p)
   }
 
   if (audioPaths.length) {
